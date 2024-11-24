@@ -2,7 +2,9 @@
 This repo contains code used for gradient-based minimization of laser plasma instabilities (LPI) using ADEPT-LPSE
 
 ### The repo
-The content is of 3 different categories
+This repository shows how to extend `ADEPT` by using one of its existing solvers to perform gradient-based optimization.
+
+The code is of 3 different categories
 1. Python scripts that run `ADEPT` in an optimization loop or parameter scan
 2. Configuration `yaml` files for `ADEPT`
 3. Module files that extend the `ADEPT` functionality by providing parameterized inputs, loss functions, and postprocessing functions
@@ -17,4 +19,4 @@ We want to minimize the LPI that occurs in a simulation. The free parameters are
 Rather than find just one set of optimal bandwidth parameters, we can choose to learn a generative function that learns the distribution of optimal parameters. This method is described in `Joglekar, A. S. Generative Neural Reparameterization for Differentiable PDE-constrained Optimization. Preprint at http://arxiv.org/abs/2410.12683 (2024).` This repo provides the code for this method.
 
 ### ADEPT
-`ADEPT` is a differentiable plasma physics simulation tool. It can be found at https://github.com/ergodicio/adept. This particular set of solvers is a JAX adaptation of the Laser-Plasma Simulation Environment developed at UR-LLE.
+`ADEPT` is a differentiable plasma physics simulation tool. It can be found at https://github.com/ergodicio/adept. This particular set of solvers uses a JAX adaptation of the Laser-Plasma Simulation Environment developed at UR-LLE. 
