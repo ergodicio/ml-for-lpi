@@ -29,7 +29,7 @@ drivers:
       decoder_depth: 3
       decoder_width: 128
       input_width: 8
-      key: 258
+      key: 25
 
 grid:
   boundary_abs_coeff: 1.0e4

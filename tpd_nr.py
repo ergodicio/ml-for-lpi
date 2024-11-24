@@ -35,6 +35,7 @@ if __name__ == "__main__":
     from utils import setup_parsl
     from adept import ergoExo
     from adept import utils as adept_utils
+    from ml4tpd import TPDModule
     import parsl
     from parsl import python_app
 
@@ -73,7 +74,7 @@ if __name__ == "__main__":
     orig_cfg = deepcopy(cfg)
 
     exo = ergoExo()
-    modules = exo.setup(cfg)
+    modules = exo.setup(cfg, adept_module=TPDModule)
 
     lr_sched = optax.cosine_decay_schedule(
         init_value=cfg["opt"]["learning_rate"], decay_steps=cfg["opt"]["decay_steps"]

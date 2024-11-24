@@ -28,8 +28,8 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1):
         if nodes == 1:
             this_provider = LocalProvider
             provider_args = dict(
-                worker_init="source /pscratch/sd/a/archis/venvs/run-adept-gpu/bin/activate; \
-                        export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ML-laser-plasma-instabilities; \
+                worker_init="source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
+                        export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                         export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
                         export MLFLOW_TRACKING_URI='/pscratch/sd/a/archis/mlflow'",
                 init_blocks=1,
@@ -46,8 +46,8 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1):
         else:
             this_provider = LocalProvider
             provider_args = dict(
-                worker_init="source /pscratch/sd/a/archis/venvs/run-adept-gpu/bin/activate; \
-                        export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ML-laser-plasma-instabilities; \
+                worker_init="source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
+                        export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                         export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
                         export MLFLOW_TRACKING_URI='/pscratch/sd/a/archis/mlflow'",
                 nodes_per_block=nodes,
@@ -75,8 +75,8 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1):
             account="m4490_g",
             scheduler_options="\n".join(sched_args),
             worker_init="export SLURM_CPU_BIND='cores';\
-                    export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ML-laser-plasma-instabilities; \
-                    source /pscratch/sd/a/archis/venvs/run-adept-gpu/bin/activate; \
+                    export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
+                    source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
                     export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
                     export MLFLOW_TRACKING_URI='/pscratch/sd/a/archis/mlflow'",
             launcher=SrunLauncher(overrides="--gpus-per-node 4 -c 128"),
