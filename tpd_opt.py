@@ -1,4 +1,3 @@
-from parsl.app.app import python_app
 import logging, os
 
 
@@ -41,7 +40,6 @@ if __name__ == "__main__":
     import uuid
     from copy import deepcopy
     from adept import ergoExo, utils
-    from utils import setup_parsl
 
     logging.basicConfig(filename=f"runlog-tpd-learn-{str(uuid.uuid4())[-4:]}.log", level=logging.INFO)
 
@@ -76,10 +74,6 @@ if __name__ == "__main__":
     exo = ergoExo()
     modules = exo.setup(cfg, module=TPDModule)
 
-    if cfg["opt"]["batch_size"] > 1:
-        setup_parsl("local", num_gpus=4, nodes=1)
-        run_one_val_and_grad = python_app(run_one_val_and_grad)
-
     lr_sched = optax.cosine_decay_schedule(
         init_value=cfg["opt"]["learning_rate"], decay_steps=cfg["opt"]["decay_steps"]
     )
@@ -102,17 +96,7 @@ if __name__ == "__main__":
                         pass
                     val, avg_grad = run_one_val_and_grad(run_id=nested_run.info.run_id, cfg_path=cfg_path)
                 else:
-                    val_and_grads = []
-                    for j in range(cfg["opt"]["batch_size"]):
-                        with mlflow.start_run(nested=True, run_name=f"epoch-{i}-sim-{j}") as nested_run:
-                            mlflow.log_artifact(module_path)
-                            # val, grad = run_one_val_and_grad(cfg, run_id=nested_run.info.run_id).result()
-                            val_and_grads.append(run_one_val_and_grad(run_id=nested_run.info.run_id, cfg_path=cfg_path))
-
-                    vgs = [vg.result() for vg in val_and_grads]  # get the results of the futures
-                    val = np.mean([v for v, _ in vgs])  # get the mean of the loss values
-
-                    avg_grad = utils.all_reduce_gradients([g for _, g in vgs], cfg["opt"]["batch_size"])
+                    raise NotImplementedError("Batch size = 1 required for direct optimization")
 
                 grad_bandwidth = avg_grad["laser"]
                 flat_grad, _ = ravel_pytree(grad_bandwidth)
