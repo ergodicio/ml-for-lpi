@@ -1,8 +1,8 @@
 density:
   basis: linear
-  gradient scale length: 366um
+  gradient scale length: 350um
   max: 0.3
-  min: 0.18
+  min: 0.2
   noise:
     max: 1.0e-09
     min: 1.0e-10
@@ -21,43 +21,41 @@ drivers:
       yr: 0.2um
       yw: 1000um
     num_colors: 64
-    shape: uniform
+    shape: generative
     output: 
-      amp: log       # or linear
-      phase: random  # or learned
-
-    params:
+      amp: log
+      phase: random
+    params: 
       decoder_depth: 3
       decoder_width: 128
       input_width: 8
-      key: 4142
-      activation: relu
+      key: 25
 
 grid:
   boundary_abs_coeff: 1.0e4
   boundary_width: 3um
-  dt: 2fs
-  dx: 20nm
+  dt: 0.004ps
+  dx: 30nm
   low_pass_filter: 0.66
-  tmax: 10.0ps
+  tmax: 15.0ps
   tmin: 0.0ns
-  ymax: 8um
-  ymin: -8um
+  ymax: 3um
+  ymin: -3um
 machine:
   calculator: gpu
 mlflow:
-  experiment: new-lpse-modules
-  run: gen-test
+  experiment: opt-L=350um, Te=4keV, I=8e14W/cm^2
+  run: 64-lines-nr-coll
 save:
   fields:
     t:
       dt: 1ps
-      tmax: 10ps
+      tmax: 15ps
       tmin: 0ps
     x:
-      dx: 40nm
+      dx: 80nm
     y:
-      dy: 40nm
+      dy: 128nm
 solver: envelope-2d
 terms:
   epw:
@@ -65,7 +63,7 @@ terms:
       x: absorbing
       y: periodic
     damping:
-      collisions: false
+      collisions: 1.0
       landau: true
     density_gradient: true
     linear: true
@@ -77,11 +75,11 @@ units:
   atomic number: 40
   envelope density: 0.25
   ionization state: 6
-  laser intensity: 7.53e14 W/cm^2
+  laser intensity: 8.0e14 W/cm^2
   laser_wavelength: 351nm
-  reference electron temperature: 3.92keV
+  reference electron temperature: 4.0keV
   reference ion temperature: 1000eV
 opt:
-  learning_rate: 0.001
-  batch_size: 1
-  decay_steps: 100
+  learning_rate: 0.003
+  batch_size: 8
+  decay_steps: 100000
