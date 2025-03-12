@@ -1,43 +1,130 @@
 from typing import Dict
 import numpy as np
 from astropy.units import Quantity as _Q
-from jax import numpy as jnp
-from jax.lax import stop_gradient
+
+from jax import numpy as jnp, tree_util as jtu
+from equinox import combine, tree_at
 from jax.random import normal, PRNGKey
 
-from equinox import filter_value_and_grad, Module
+from equinox import filter_value_and_grad, Module, is_array, tree_at
 
-from adept.lpse2d import BaseLPSE2D, UniformDriver
+from adept.lpse2d import BaseLPSE2D, ArbitraryDriver
+from adept._lpse2d.modules import driver
 
 from . import nn
 from .postprocess import postprocess_bandwidth
 
 
-class GenerativeDriver(UniformDriver):
-    input_width: int
+class TPDLearner(ArbitraryDriver):
+
     model: Module
-    amp_output: str
-    phase_output: str
+    inputs: np.array
 
     def __init__(self, cfg: Dict):
         super().__init__(cfg)
 
-        self.input_width = cfg["drivers"]["E0"]["params"]["input_width"]
-        cfg["drivers"]["E0"]["params"]["output_width"] = cfg["drivers"]["E0"]["num_colors"]
-        self.model = nn.GenerativeModel(**cfg["drivers"]["E0"]["params"])
-        self.amp_output = cfg["drivers"]["E0"]["output"]["amp"]
-        self.phase_output = cfg["drivers"]["E0"]["output"]["phase"]
+        cfg["drivers"]["E0"]["params"]["nn"]["output_width"] = cfg["drivers"]["E0"]["num_colors"]
+        self.model = nn.GenerativeModel(**cfg["drivers"]["E0"]["params"]["nn"])
+        Te = _Q(cfg["units"]["reference electron temperature"]).to("keV").value
+        Ln = _Q(cfg["density"]["gradient scale length"]).to("um").value
+        I0 = _Q(cfg["units"]["laser intensity"]).to("W/cm^2").value
+
+        Te = (Te - 3.0) / 2.0
+        Ln = (Ln - 450.0) / 400
+        I0 = (np.log10(I0) - 14.5) / 1
+        self.inputs = 2 * np.array((Te, Ln, I0))
+
+    def get_partition_spec(self):
+        filter_spec = jtu.tree_map(lambda _: False, self)
+        model_filter_spec = jtu.tree_map(lambda x: True if is_array(x) else False, self.model)
+        return tree_at(lambda tree: tree.model, filter_spec, replace=model_filter_spec)
+
+    def __call__(self, state: Dict, args: Dict) -> tuple:
+
+        ints_and_phases = self.model(jnp.array(self.inputs))
+        ints, phases = self.process_amplitudes_phases(ints_and_phases)
+        args["drivers"]["E0"] = {"delta_omega": self.delta_omega, "phases": phases, "intensities": ints} | self.envelope
+        return state, args
+
+    def process_amplitudes_phases(self, ints_and_phases):
+        if self.model_cfg["amplitudes"]["learned"]:
+            ints = ints_and_phases["amps"]
+        else:
+            ints = self.intensities
+
+        ints = self.scale_intensities(ints)
+        ints = ints / jnp.sum(ints)
+
+        if self.model_cfg["phases"]["learned"]:
+            _phases_ = ints_and_phases["phases"]
+        else:
+            _phases_ = self.phases
+
+        phases = jnp.pi * jnp.tanh(_phases_)
+        return ints, phases
+
+
+class GenerativeDriver(ArbitraryDriver):
+    input_width: int
+    model: Module
+
+    def __init__(self, cfg: Dict):
+        super().__init__(cfg)
+
+        self.input_width = cfg["drivers"]["E0"]["params"]["nn"]["input_width"]
+        cfg["drivers"]["E0"]["params"]["nn"]["output_width"] = cfg["drivers"]["E0"]["num_colors"]
+        self.model = nn.GenerativeModel(**cfg["drivers"]["E0"]["params"]["nn"])
+
+    def get_partition_spec(self):
+        filter_spec = jtu.tree_map(lambda _: False, self)
+        model_filter_spec = jtu.tree_map(lambda _: False, self.model)
+        if self.model_cfg["amplitudes"]["learned"]:
+            amp_model_filter_spec = jtu.tree_map(lambda _: False, self.model.amp_decoder)
+            for i in range(len(self.model.amp_decoder.layers)):
+                amp_model_filter_spec = tree_at(
+                    lambda tree: (tree.layers[i].weight, tree.layers[i].bias),
+                    amp_model_filter_spec,
+                    replace=(True, True),
+                )
+
+        if self.model_cfg["phases"]["learned"]:
+            phase_model_filter_spec = jtu.tree_map(lambda _: False, self.model.phase_decoder)
+            for i in range(len(self.model.phase_decoder.layers)):
+                phase_model_filter_spec = tree_at(
+                    lambda tree: (tree.layers[i].weight, tree.layers[i].bias),
+                    phase_model_filter_spec,
+                    replace=(True, True),
+                )
+
+        filter_spec = tree_at(lambda tree: tree.model, filter_spec, replace=model_filter_spec)
+        filter_spec = tree_at(lambda tree: tree.model.amp_decoder, filter_spec, replace=amp_model_filter_spec)
+        filter_spec = tree_at(lambda tree: tree.model.phase_decoder, filter_spec, replace=phase_model_filter_spec)
+
+        return filter_spec
 
     def __call__(self, state: Dict, args: Dict) -> tuple:
         inputs = normal(PRNGKey(seed=np.random.randint(2**20)), shape=(self.input_width,))
         ints_and_phases = self.model(inputs)
-        ints, phases = self.scale_ints_and_phases(ints_and_phases["amps"], ints_and_phases["phases"])
-        args["drivers"]["E0"] = {
-            "delta_omega": stop_gradient(self.delta_omega),
-            "initial_phase": phases,
-            "intensities": ints,
-        } | {k: stop_gradient(v) for k, v in self.envelope.items()}
+        ints, phases = self.process_amplitudes_phases(ints_and_phases)
+        args["drivers"]["E0"] = {"delta_omega": self.delta_omega, "phases": phases, "intensities": ints} | self.envelope
         return state, args
+
+    def process_amplitudes_phases(self, ints_and_phases):
+        if self.model_cfg["amplitudes"]["learned"]:
+            ints = ints_and_phases["amps"]
+        else:
+            ints = self.intensities
+
+        ints = self.scale_intensities(ints)
+        ints = ints / jnp.sum(ints)
+
+        if self.model_cfg["phases"]["learned"]:
+            _phases_ = ints_and_phases["phases"]
+        else:
+            _phases_ = self.phases
+
+        phases = jnp.pi * jnp.tanh(_phases_)
+        return ints, phases
 
 
 class TPDModule(BaseLPSE2D):
@@ -45,14 +132,27 @@ class TPDModule(BaseLPSE2D):
         super().__init__(cfg)
 
     def init_modules(self) -> Dict:
+        self.metric_timesteps = np.argmin(
+            np.abs(self.cfg["save"]["default"]["t"]["ax"] - self.cfg["opt"]["metric_time_in_ps"])
+        )
+        self.metric_dt = self.cfg["save"]["default"]["t"]["ax"][1] - self.cfg["save"]["default"]["t"]["ax"][0]
         try:
             return super().init_modules()
         except NotImplementedError:
             # check if shape is etamodel
             modules = {}
-
             if "generative" == self.cfg["drivers"]["E0"]["shape"].casefold():
                 modules = {"laser": GenerativeDriver(self.cfg)}
+            elif "learner" == self.cfg["drivers"]["E0"]["shape"].casefold():
+                modules = {"laser": TPDLearner(self.cfg)}
+            elif "random_phaser" == self.cfg["drivers"]["E0"]["shape"].casefold():
+                laser_module = driver.load(self.cfg, ArbitraryDriver)
+                laser_module = tree_at(
+                    lambda tree: tree.phases,
+                    laser_module,
+                    replace=jnp.array(np.random.uniform(-1, 1, self.cfg["drivers"]["E0"]["num_colors"])),
+                )
+                modules = {"laser": laser_module}
 
             else:
                 raise NotImplementedError("Only generative model is supported in this repo")
@@ -79,12 +179,14 @@ class TPDModule(BaseLPSE2D):
         return units_dict
 
     def __call__(self, trainable_modules, args=None):
+
+        if args is not None:
+            if "static_modules" in args:
+                trainable_modules["laser"] = combine(trainable_modules["laser"], args["static_modules"]["laser"])
+
         out_dict = super().__call__(trainable_modules, args)
-        phi_xy = out_dict["solver result"].ys["fields"]["epw"][-4:]
-        phi_k = jnp.fft.fft2(phi_xy.view(jnp.complex128), axes=(-2, -1))
-        ex_k = -1j * self.cfg["save"]["fields"]["kx"][None, :, None] * phi_k
-        ey_k = -1j * self.cfg["save"]["fields"]["ky"][None, None, :] * phi_k
-        log10e_sq = jnp.log10(jnp.sum(jnp.abs(ex_k) ** 2 + jnp.abs(ey_k) ** 2))
+        e_sq = jnp.sum(out_dict["solver result"].ys["default"]["e_sq"][self.metric_timesteps :]) * self.metric_dt
+        log10e_sq = jnp.log10(e_sq)
         return log10e_sq, out_dict
 
     def vg(self, trainable_modules, args=None):
@@ -109,5 +211,5 @@ class TPDModule(BaseLPSE2D):
             np.log10(metrics[f"total_e_sq_last_{tint}_ps".replace(".", "p")])
         )
         metrics[f"growth_rate_last_{tint}_ps".replace(".", "p")] = float(np.mean(np.gradient(np.log(total_esq), dt)))
-
+        metrics["loss"] = float(val)
         return {"k": ppo["k"], "x": fields, "metrics": metrics}

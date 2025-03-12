@@ -18,7 +18,7 @@ def robust_rmtree(directory, retries=5, delay=5):
         print(f"Failed to remove {directory} after {retries} attempts.")
 
 
-def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1):
+def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"):
     from parsl.config import Config
     from parsl.providers import SlurmProvider, LocalProvider
     from parsl.launchers import SrunLauncher
@@ -31,7 +31,7 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1):
                 worker_init="source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
                         export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                         export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
-                        export MLFLOW_TRACKING_URI='/pscratch/sd/a/archis/mlflow'",
+                        export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'",
                 init_blocks=1,
                 max_blocks=1,
                 nodes_per_block=1,
@@ -49,7 +49,7 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1):
                 worker_init="source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
                         export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                         export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
-                        export MLFLOW_TRACKING_URI='/pscratch/sd/a/archis/mlflow'",
+                        export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'",
                 nodes_per_block=nodes,
                 launcher=SrunLauncher(overrides="-c 32 --gpus-per-node 4"),
                 cmd_timeout=120,
@@ -78,9 +78,9 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1):
                     export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                     source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
                     export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
-                    export MLFLOW_TRACKING_URI='/pscratch/sd/a/archis/mlflow'",
+                    export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'",
             launcher=SrunLauncher(overrides="--gpus-per-node 4 -c 128"),
-            walltime="12:00:00",
+            walltime=walltime,
             cmd_timeout=120,
             nodes_per_block=1,
             # init_blocks=1,

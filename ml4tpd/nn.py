@@ -28,6 +28,8 @@ def get_activation(activation: str) -> Callable:
         from jax.nn import softplus as activation
     elif activation == "elu":
         from jax.nn import elu as activation
+    elif activation == "leaky_relu":
+        from jax.nn import leaky_relu as activation
 
     else:
         raise NotImplementedError(f"Activation function {activation} not recognized.")
@@ -38,6 +40,7 @@ def get_activation(activation: str) -> Callable:
 class GenerativeModel(eqx.Module):
     amp_decoder: eqx.Module
     phase_decoder: eqx.Module
+    output_width: int
 
     def __init__(
         self,
@@ -56,11 +59,12 @@ class GenerativeModel(eqx.Module):
         self.amp_decoder = eqx.nn.MLP(
             input_width, output_width, width_size=decoder_width, depth=decoder_depth, key=da_k, activation=act_fun
         )
+        self.output_width = output_width
         self.phase_decoder = eqx.nn.MLP(
             input_width, output_width, width_size=decoder_width, depth=decoder_depth, key=dp_k, activation=act_fun
         )
 
     def __call__(self, x: Array) -> Dict:
-        amps = self.amp_decoder(x)
-        phases = self.phase_decoder(x)
+        amps = 3 * self.amp_decoder(x)
+        phases = 3 * self.phase_decoder(x)
         return {"amps": amps, "phases": phases}

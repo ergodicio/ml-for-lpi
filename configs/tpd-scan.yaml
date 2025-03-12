@@ -1,6 +1,6 @@
 density:
   basis: linear
-  gradient scale length: 333.33333um
+  gradient scale length: 600um
   max: 0.3
   min: 0.2
   noise:
@@ -21,7 +21,8 @@ drivers:
       yr: 0.2um
       yw: 1000um
     num_colors: 64
-    shape: arbitrary
+    shape: random_phaser
+    file: s3://public-ergodic-continuum/181417/42ea9bc6bd9c44749bf3c7f5f1ff5fb8/artifacts/laser.eqx
     params:
       amplitudes: 
         init: random # uniform, random
@@ -49,8 +50,8 @@ parsl:
   nodes: 1
 
 mlflow:
-  experiment: opt-64lines
-  run: temperature=2000.0-gsl=333.3-intensity=7.00e+14
+  experiment: opt-randomphase-64lines
+  run: tpd-scan
 save:
   fields:
     t:
@@ -80,9 +81,9 @@ units:
   atomic number: 40
   envelope density: 0.25
   ionization state: 6
-  laser intensity: 7.0e14 W/cm^2
+  laser intensity: 4.0e14 W/cm^2
   laser_wavelength: 351nm
-  reference electron temperature: 2000 eV
+  reference electron temperature: 3.5keV
   reference ion temperature: 1000eV
 opt:
   learning_rate: 0.1

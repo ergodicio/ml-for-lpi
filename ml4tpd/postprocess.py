@@ -16,12 +16,6 @@ def calc_coherence(lpse_module, used_driver, density):
     tau = np.linspace(-150 * t0, 150 * t0, Ntau)
     ey = np.zeros((Ntau, 2), dtype=np.complex64)
 
-    # light_wave = {
-    #     "initial_phase": modules["driver"].initial_phase,
-    #     "intensities": modules["driver"].intensities,
-    #     "delta_omega": modules["driver"].delta_omega,
-    # }
-
     for it, ttau in enumerate(tau):
         tt = np.random.uniform(0, 1e3, int(1e5))
         e0_tt = calc_e0(tt, density, used_driver["E0"])
@@ -74,7 +68,7 @@ def plot_bandwidth(e0, td):
     ax[1].grid()
     ax[1].set_xlabel(r"$\Delta \omega / \omega_0$", fontsize=14)
     ax[1].set_ylabel("$|E|$", fontsize=14)
-    ax[2].plot(dw_over_w, e0["initial_phase"], "o")
+    ax[2].plot(dw_over_w, e0["phases"], "o")
     ax[2].grid()
     ax[2].set_xlabel(r"$\Delta \omega / \omega_0$", fontsize=14)
     ax[2].set_ylabel(r"$\angle E$", fontsize=14)
