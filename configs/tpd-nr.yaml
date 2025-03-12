@@ -22,35 +22,44 @@ drivers:
       yw: 1000um
     num_colors: 64
     shape: generative
-    output: 
-      amp: log
-      phase: random
-    params: 
-      decoder_depth: 3
-      decoder_width: 128
-      input_width: 8
-      key: 25
+    params:
+      amplitudes: 
+        init: random # uniform, random
+        learned: true
+        activation: log # linear, log
+      phases:
+        init: random # random, seed-###
+        learned: true 
+        seed: 42
+      nn:
+        decoder_width: 64
+        decoder_depth: 3
+        input_width: 6
+        key: 218
+        activation: tanh
 
 grid:
   boundary_abs_coeff: 1.0e4
   boundary_width: 3um
-  dt: 0.004ps
+  dt: 0.001ps
   dx: 30nm
   low_pass_filter: 0.66
-  tmax: 15.0ps
+  tmax: 10.0ps
   tmin: 0.0ns
   ymax: 3um
   ymin: -3um
-machine:
-  calculator: gpu
+parsl:
+  provider: local
+  nodes: 8
+
 mlflow:
-  experiment: opt-L=350um, Te=4keV, I=8e14W/cm^2
-  run: 64-lines-nr-coll
+  experiment: nr-L=350um, Te=4keV, I=1e15W/cm^2
+  run: gen-64lines
 save:
   fields:
     t:
       dt: 1ps
-      tmax: 15ps
+      tmax: 10ps
       tmin: 0ps
     x:
       dx: 80nm
@@ -75,11 +84,13 @@ units:
   atomic number: 40
   envelope density: 0.25
   ionization state: 6
-  laser intensity: 8.0e14 W/cm^2
+  laser intensity: 1.0e15 W/cm^2
   laser_wavelength: 351nm
   reference electron temperature: 4.0keV
   reference ion temperature: 1000eV
 opt:
   learning_rate: 0.003
-  batch_size: 8
+  batch_size: 32
   decay_steps: 100000
+  method: optax
+  metric_time_in_ps: 6.0
