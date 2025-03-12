@@ -1,5 +1,8 @@
+from typing import Dict
+
 import logging, os
 from contextlib import redirect_stdout, redirect_stderr
+from scipy.optimize import OptimizeResult
 
 logger = logging.getLogger(__name__)
 
@@ -9,7 +12,21 @@ else:
     BASE_TEMPDIR = None
 
 
-def run_one_val_and_grad(run_id, _cfg_path):
+def run_one_val_and_grad(run_id: str, _cfg_path: str):
+    """
+    Runs a single val and grad step.
+
+    This function calculates the total electrostatic energy
+    in the box and the gradient of the total electrostatic energy with respect to
+    the laser parameters.
+
+    Args:
+        run_id: str: The run id
+        _cfg_path: str: The config path
+
+    Returns:
+        val, grad: Tuple: The value and the gradient
+    """
     import yaml
     import equinox as eqx
 
@@ -31,7 +48,23 @@ def run_one_val_and_grad(run_id, _cfg_path):
     return val, grad
 
 
-def calc_loss_and_grads(modules, epoch, parent_run_id, orig_cfg):
+def calc_loss_and_grads(modules: Dict, epoch: int, parent_run_id: str, orig_cfg: Dict):
+    """
+    This is a wrapper around the run_one_val_and_grad function.
+
+    It logs the loss and the gradient norm to mlflow.
+
+    Args:
+        modules: Dict: The modules
+        epoch: int: The epoch
+        parent_run_id: str: The parent run id
+        orig_cfg: Dict: The original config
+
+    Returns:
+        val, flat_grad, grad: Tuple: The value, the flattened gradient, and the pytree gradient
+
+
+    """
     import tempfile, yaml
 
     import numpy as np
@@ -53,20 +86,30 @@ def calc_loss_and_grads(modules, epoch, parent_run_id, orig_cfg):
         output_file = os.path.join(_td, f"stdout_stderr.txt")
         with open(output_file, "w") as f:
             with redirect_stdout(f), redirect_stderr(f):
-                val, avg_grad = run_one_val_and_grad(run_id=nested_run.info.run_id, _cfg_path=_cfg_path)
+                val, grad = run_one_val_and_grad(run_id=nested_run.info.run_id, _cfg_path=_cfg_path)
 
         mlflow.log_artifacts(_td, run_id=nested_run.info.run_id)
 
-    flat_grad, _ = ravel_pytree(avg_grad["laser"])
+    flat_grad, _ = ravel_pytree(grad["laser"])
     loss = float(val)
     grad_norm = float(np.linalg.norm(flat_grad))
 
     mlflow.log_metrics({"loss": loss, "grad norm": grad_norm}, step=epoch, run_id=parent_run_id)
 
-    return val, flat_grad, avg_grad["laser"]
+    return val, flat_grad, grad["laser"]
 
 
-def optax_loop(parent_run_id, orig_cfg, modules):
+def optax_loop(parent_run_id: str, orig_cfg: Dict, modules: Dict):
+    """
+    Performs the optimization loop using optax.
+
+    Args:
+        parent_run_id: str: The parent run id
+        orig_cfg: Dict: The original config
+        modules: Dict: The modules
+
+
+    """
     import optax
     import equinox as eqx
 
@@ -82,7 +125,21 @@ def optax_loop(parent_run_id, orig_cfg, modules):
         modules["laser"] = eqx.apply_updates(modules["laser"], updates)
 
 
-def scipy_loop(parent_run_id, orig_cfg, modules):
+def scipy_loop(parent_run_id: str, orig_cfg: Dict, modules: Dict) -> OptimizeResult:
+    """
+    Performs the optimization loop using scipy.
+
+    The main reason this is different than the optax loop is because scipy prefers numpy arrays so
+    the pytrees need to be flattened
+
+    Args:
+        parent_run_id: str: The parent run id
+        orig_cfg: Dict: The original config
+        modules: Dict: The modules
+
+    Returns:
+        result: The result of the optimization
+    """
     from scipy.optimize import minimize
     from jax.flatten_util import ravel_pytree
     import numpy as np
@@ -121,7 +178,15 @@ def scipy_loop(parent_run_id, orig_cfg, modules):
     return result
 
 
-def run_opt(_cfg_path):
+def run_opt(_cfg_path: str):
+    """
+    Sets up and runs the parent run which is the optimization loop
+
+    Args:
+        _cfg_path: str: Path to the config file
+
+
+    """
     import uuid
     from copy import deepcopy
     from adept import ergoExo
