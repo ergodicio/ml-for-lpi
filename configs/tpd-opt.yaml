@@ -46,10 +46,10 @@ grid:
 
 parsl:
   provider: local
-  nodes: 1
+  nodes: 128
 
 mlflow:
-  experiment: opt-64lines
+  experiment: opt-64lines-ensembles
   run: temperature=2000.0-gsl=333.3-intensity=7.00e+14
 save:
   fields:

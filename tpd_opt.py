@@ -48,7 +48,7 @@ def run_one_val_and_grad(run_id: str, _cfg_path: str):
     return val, grad
 
 
-def calc_loss_and_grads(modules: Dict, epoch: int, parent_run_id: str, orig_cfg: Dict):
+def calc_loss_and_grads(modules: Dict, epoch: int, orig_cfg: Dict):
     """
     This is a wrapper around the run_one_val_and_grad function.
 
@@ -94,12 +94,12 @@ def calc_loss_and_grads(modules: Dict, epoch: int, parent_run_id: str, orig_cfg:
     loss = float(val)
     grad_norm = float(np.linalg.norm(flat_grad))
 
-    mlflow.log_metrics({"loss": loss, "grad norm": grad_norm}, step=epoch, run_id=parent_run_id)
+    mlflow.log_metrics({"loss": loss, "grad norm": grad_norm}, step=epoch)
 
     return val, flat_grad, grad["laser"]
 
 
-def optax_loop(parent_run_id: str, orig_cfg: Dict, modules: Dict):
+def optax_loop(orig_cfg: Dict, modules: Dict):
     """
     Performs the optimization loop using optax.
 
@@ -119,13 +119,13 @@ def optax_loop(parent_run_id: str, orig_cfg: Dict, modules: Dict):
     opt = optax.adam(learning_rate=lr_sched)
     opt_state = opt.init(eqx.filter(modules["laser"], eqx.is_array))  # initialize the optimizer state
 
-    for i in range(64):  # 1000 epochs
-        _, _, laser_grad = calc_loss_and_grads(modules, i, parent_run_id, orig_cfg)
+    for i in range(200):  # 1000 epochs
+        _, _, laser_grad = calc_loss_and_grads(modules, i, orig_cfg)
         updates, opt_state = opt.update(laser_grad, opt_state, modules["laser"])
         modules["laser"] = eqx.apply_updates(modules["laser"], updates)
 
 
-def scipy_loop(parent_run_id: str, orig_cfg: Dict, modules: Dict) -> OptimizeResult:
+def scipy_loop(orig_cfg: Dict, modules: Dict) -> OptimizeResult:
     """
     Performs the optimization loop using scipy.
 
@@ -151,14 +151,14 @@ def scipy_loop(parent_run_id: str, orig_cfg: Dict, modules: Dict) -> OptimizeRes
             x0, self.static_params = eqx.partition(_modules["laser"], _modules["laser"].get_partition_spec())
             self.flattened_x0, self.unravel_pytree = ravel_pytree(x0)
             self.epoch = 0
-            self.parent_run_id = parent_run_id
+            # self.parent_run_id = parent_run_id
 
         def loss_fn(self, flattened_x):
             diff_params = self.unravel_pytree(flattened_x)
             modules["laser"] = eqx.combine(diff_params, self.static_params)
             for k in self.model_cfg.keys():
                 modules["laser"].model_cfg[k] = self.model_cfg[k]
-            val, flat_grad, _ = calc_loss_and_grads(modules, self.epoch, self.parent_run_id, orig_cfg)
+            val, flat_grad, _ = calc_loss_and_grads(modules, self.epoch, orig_cfg)
             self.epoch += 1
 
             return float(val), np.array(flat_grad)
@@ -222,17 +222,16 @@ def run_opt(_cfg_path: str):
             with open(os.path.join(td, "config.yaml"), "w") as fi:
                 yaml.dump(cfg, fi)
             mlflow.log_artifacts(td)
-        adept_utils.log_params(cfg)
+        # adept_utils.log_params(cfg)
 
-    parent_run_id = mlflow_run.info.run_id
+        parent_run_id = mlflow_run.info.run_id
+        orig_cfg = deepcopy(cfg)
 
-    orig_cfg = deepcopy(cfg)
-
-    exo = ergoExo()
+    exo = ergoExo(mlflow_run_id=parent_run_id, mlflow_nested=False)
     modules = exo.setup(cfg, adept_module=TPDModule)
 
     with mlflow.start_run(run_id=parent_run_id, log_system_metrics=True) as mlflow_run:
-        optimization_loop(parent_run_id, orig_cfg, modules)
+        optimization_loop(orig_cfg, modules)
 
     return mlflow_run
 

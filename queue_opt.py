@@ -10,7 +10,7 @@ else:
 QUEUE_DIR = "/pscratch/sd/a/archis/queue-configs"
 
 
-def load_and_make_folders(base_cfg_path: str, _tt, _gsl, _intensity) -> str:
+def load_and_make_folders(base_cfg_path: str, _tt, _gsl, _intensity, _seed) -> str:
     """
     This is used to queue runs on NERSC
 
@@ -25,14 +25,13 @@ def load_and_make_folders(base_cfg_path: str, _tt, _gsl, _intensity) -> str:
         cfg = yaml.safe_load(fi)
 
     experiment = cfg["mlflow"]["experiment"]
-    run_name = f"temperature={_tt:.1f}-gsl={_gsl:.1f}-intensity={_intensity:.2e}"
+    run_name = f"temperature={_tt:.1f}-gsl={_gsl:.1f}-intensity={_intensity:.2e}-seed={_seed}"
     cfg["mlflow"]["run"] = run_name
-
-    mlflow.set_experiment(experiment)
 
     cfg["units"]["reference electron temperature"] = f"{_tt} eV"
     cfg["units"]["laser intensity"] = f"{_intensity} W/cm^2"
     cfg["density"]["gradient scale length"] = f"{_gsl} um"
+    cfg["drivers"]["E0"]["params"]["phases"]["seed"] = int(_seed)
 
     _cfg_path = os.path.join(QUEUE_DIR, f"{str(uuid4())}.yaml")
     with open(_cfg_path, "w") as fi:
@@ -60,12 +59,13 @@ if __name__ == "__main__":
     gradient_scale_lengths = np.linspace(200, 600, 4)
     intensities = np.linspace(1e14, 1e15, 4)
 
-    all_hps = product(temperatures, gradient_scale_lengths, intensities)
-    all_hps = list(all_hps)
-    # np.random.shuffle(all_hps)
+    all_hps = list(product(temperatures, gradient_scale_lengths, intensities))
+    seeds = np.random.randint(0, 10000, len(all_hps))
+    all_hps = [t + (d,) for t, d in zip(all_hps, seeds)]
 
-    for tt, gsl, intensity in all_hps:
-        cfg_path = load_and_make_folders("configs/tpd-opt.yaml", tt, gsl, intensity)
-        _queue_run_(cfg_path)
-    os.system("sqs")
+    for _ in range(2):
+        for tt, gsl, intensity, seed in all_hps:
+            cfg_path = load_and_make_folders("configs/tpd-opt.yaml", tt, gsl, intensity, seed)
+            _queue_run_(cfg_path)
+
     os.system("rm new_job.sh")
