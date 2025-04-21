@@ -2,11 +2,9 @@ from typing import Dict
 import numpy as np
 from astropy.units import Quantity as _Q
 
-from jax import numpy as jnp, tree_util as jtu
-from equinox import combine, tree_at
-from jax.random import normal, PRNGKey
-
-from equinox import filter_value_and_grad, Module, is_array
+from jax import numpy as jnp, tree_util as jtu, nn as jnn
+from equinox import combine, tree_at, filter_value_and_grad, Module, is_array, nn as eqx_nn
+from jax.random import normal, PRNGKey, uniform, split
 
 from adept.lpse2d import BaseLPSE2D, ArbitraryDriver
 from adept._lpse2d.modules import driver
@@ -39,33 +37,136 @@ class ZeroLiner(ArbitraryDriver):
         return state, args
 
 
+class LearnedSpacer(ArbitraryDriver):
+    first_delta_omega: float
+    dw_spacing: float
+    delta_omega_max: float
+
+    def __init__(self, cfg: Dict):
+        super().__init__(cfg)
+        self.first_delta_omega = np.random.uniform(
+            cfg["drivers"]["E0"]["delta_omega_min"], cfg["drivers"]["E0"]["delta_omega_max"]
+        )
+        self.dw_spacing = np.random.uniform(
+            0, cfg["drivers"]["E0"]["delta_omega_max"] - cfg["drivers"]["E0"]["delta_omega_min"]
+        )
+        self.delta_omega_max = cfg["drivers"]["E0"]["delta_omega_max"]
+
+    def __call__(self, state: Dict, args: Dict) -> tuple:
+
+        delta_omega = jnp.arange(self.first_delta_omega, self.delta_omega_max, self.dw_spacing)
+        intensities = jnp.ones_like(delta_omega)
+        intensities = intensities / jnp.sum(intensities)
+
+        args["drivers"]["E0"] = {
+            "delta_omega": delta_omega,
+            "phases": jnp.tanh(self.phases) * jnp.pi,
+            "intensities": intensities,
+        } | self.envelope
+        return state, args
+
+
+def reinitialize_nns(model: Module, key: PRNGKey) -> Module:
+
+    weight_keys = split(key, num=len(model.layers))
+    bias_keys = split(key, num=len(model.layers))
+
+    for i in range(len(model.layers)):
+        model = tree_at(
+            lambda tree: tree.layers[i].weight,
+            model,
+            replace=uniform(weight_keys[i], model.layers[i].weight.shape, minval=-1, maxval=1),
+        )
+
+        model = tree_at(
+            lambda tree: tree.layers[i].bias,
+            model,
+            replace=uniform(bias_keys[i], model.layers[i].bias.shape, minval=-1, maxval=1),
+        )
+
+    return model
+
+
 class TPDLearner(ArbitraryDriver):
 
-    model: Module
+    amp_model: Module
+    phase_model: Module
     inputs: np.array
 
     def __init__(self, cfg: Dict):
         super().__init__(cfg)
 
         cfg["drivers"]["E0"]["params"]["nn"]["output_width"] = cfg["drivers"]["E0"]["num_colors"]
-        self.model = nn.GenerativeModel(**cfg["drivers"]["E0"]["params"]["nn"])
+        # self.model = nn.GenerativeModel(**cfg["drivers"]["E0"]["params"]["nn"])
+        if cfg["drivers"]["E0"]["params"]["nn"]["activation"] == "relu":
+            act_fun = jnn.relu
+        elif cfg["drivers"]["E0"]["params"]["nn"]["activation"] == "tanh":
+            act_fun = jnp.tanh
+        elif cfg["drivers"]["E0"]["params"]["nn"]["activation"] == "sigmoid":
+            act_fun = jnn.sigmoid
+        else:
+            # print("Using default activation function")
+            # act_fun = lambda x: x
+            raise NotImplementedError(
+                f"Activation function {cfg['drivers']['E0']['params']['nn']['activation']} not supported"
+            )
+
+        nn_params = {
+            "in_size": cfg["drivers"]["E0"]["params"]["nn"]["in_size"],
+            "out_size": cfg["drivers"]["E0"]["num_colors"],
+            "width_size": cfg["drivers"]["E0"]["params"]["nn"]["width_size"],
+            "depth": cfg["drivers"]["E0"]["params"]["nn"]["depth"],
+            "key": PRNGKey(seed=np.random.randint(2**20)),
+            "activation": act_fun,
+        }
+
+        self.amp_model = eqx_nn.MLP(**nn_params)
+
+        reinitialize_nns(self.amp_model, key=PRNGKey(seed=np.random.randint(2**20)))
+
+        nn_params["key"] = PRNGKey(seed=np.random.randint(2**20))
+        self.phase_model = eqx_nn.MLP(**nn_params)
+
+        reinitialize_nns(self.phase_model, key=PRNGKey(seed=np.random.randint(2**20)))
+
         Te = _Q(cfg["units"]["reference electron temperature"]).to("keV").value
         Ln = _Q(cfg["density"]["gradient scale length"]).to("um").value
         I0 = _Q(cfg["units"]["laser intensity"]).to("W/cm^2").value
 
-        Te = (Te - 3.0) / 2.0
-        Ln = (Ln - 450.0) / 400
-        I0 = (np.log10(I0) - 14.5) / 1
-        self.inputs = 2 * np.array((Te, Ln, I0))
+        Te = (Te - 3.0) / 1.0
+        Ln = (Ln - 400.0) / 200
+        I0 = (np.log10(I0) - 14.5) / 0.5
+        self.inputs = np.array((Te, Ln, I0))
 
     def get_partition_spec(self):
         filter_spec = jtu.tree_map(lambda _: False, self)
-        model_filter_spec = jtu.tree_map(lambda x: True if is_array(x) else False, self.model)
-        return tree_at(lambda tree: tree.model, filter_spec, replace=model_filter_spec)
+        amp_model_filter_spec = jtu.tree_map(lambda _: False, self.amp_model)
+        for i in range(len(self.amp_model.layers)):
+            amp_model_filter_spec = tree_at(
+                lambda tree: (tree.layers[i].weight, tree.layers[i].bias),
+                amp_model_filter_spec,
+                replace=(True, True),
+            )
+
+        phase_model_filter_spec = jtu.tree_map(lambda _: False, self.phase_model)
+        for i in range(len(self.phase_model.layers)):
+            phase_model_filter_spec = tree_at(
+                lambda tree: (tree.layers[i].weight, tree.layers[i].bias),
+                phase_model_filter_spec,
+                replace=(True, True),
+            )
+
+        filter_spec = tree_at(lambda tree: tree.phase_model, filter_spec, replace=phase_model_filter_spec)
+        filter_spec = tree_at(lambda tree: tree.amp_model, filter_spec, replace=amp_model_filter_spec)
+
+        return filter_spec
 
     def __call__(self, state: Dict, args: Dict) -> tuple:
 
-        ints_and_phases = self.model(jnp.array(self.inputs))
+        ints_and_phases = {
+            "amps": self.amp_model(jnp.array(self.inputs)),
+            "phases": self.phase_model(jnp.array(self.inputs)),
+        }
         ints, phases = self.process_amplitudes_phases(ints_and_phases)
         args["drivers"]["E0"] = {"delta_omega": self.delta_omega, "phases": phases, "intensities": ints} | self.envelope
         return state, args
@@ -76,6 +177,7 @@ class TPDLearner(ArbitraryDriver):
         else:
             ints = self.intensities
 
+        ints *= 3
         ints = self.scale_intensities(ints)
         ints = ints / jnp.sum(ints)
 
@@ -85,6 +187,8 @@ class TPDLearner(ArbitraryDriver):
             _phases_ = self.phases
 
         phases = jnp.pi * jnp.tanh(_phases_)
+        phases *= 3.0
+
         return ints, phases
 
 
