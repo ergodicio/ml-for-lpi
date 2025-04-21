@@ -42,7 +42,7 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
                 provider=this_provider(**provider_args),
                 cpu_affinity="block",
             )
-            print(f"{htex.workers_per_node=}")
+
         else:
             this_provider = LocalProvider
             provider_args = dict(
@@ -50,21 +50,20 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
                         export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                         export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
                         export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'",
-                nodes_per_block=nodes,
+                nodes_per_block=1,
                 launcher=SrunLauncher(overrides="-c 32 --gpus-per-node 4"),
                 cmd_timeout=120,
                 init_blocks=1,
-                max_blocks=1,
+                max_blocks=nodes,
             )
 
             htex = HighThroughputExecutor(
-                available_accelerators=num_gpus * nodes,
+                available_accelerators=num_gpus,
                 label="tpd",
                 provider=this_provider(**provider_args),
                 max_workers_per_node=4,
                 cpu_affinity="block",
             )
-            print(f"{htex.workers_per_node=}")
 
     elif parsl_provider == "gpu":
 
@@ -92,7 +91,7 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
         )
         print(f"{htex.workers_per_node=}")
 
-    return Config(executors=[htex], retries=4)
+    return Config(executors=[htex], retries=0)
 
 
 def get_checkpoint(resume_dict) -> Tuple[str, OptState]:

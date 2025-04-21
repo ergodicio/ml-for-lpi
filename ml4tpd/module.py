@@ -6,13 +6,37 @@ from jax import numpy as jnp, tree_util as jtu
 from equinox import combine, tree_at
 from jax.random import normal, PRNGKey
 
-from equinox import filter_value_and_grad, Module, is_array, tree_at
+from equinox import filter_value_and_grad, Module, is_array
 
 from adept.lpse2d import BaseLPSE2D, ArbitraryDriver
 from adept._lpse2d.modules import driver
 
 from . import nn
 from .postprocess import postprocess_bandwidth
+
+
+class ZeroLiner(ArbitraryDriver):
+    threshold: float
+
+    def __init__(self, cfg: Dict):
+        super().__init__(cfg)
+        old_driver = driver.load(cfg, ArbitraryDriver)
+        self.intensities = old_driver.intensities
+        self.phases = old_driver.phases
+        self.threshold = cfg["drivers"]["E0"]["intensity_threshold"]
+
+    def __call__(self, state: Dict, args: Dict) -> tuple:
+        intensities = self.scale_intensities(self.intensities)
+        intensities = intensities / jnp.sum(intensities)
+        intensities = jnp.where(intensities < self.threshold, 0.0, intensities)
+        intensities = intensities / jnp.sum(intensities)
+
+        args["drivers"]["E0"] = {
+            "delta_omega": self.delta_omega,
+            "phases": jnp.tanh(self.phases) * jnp.pi,
+            "intensities": intensities,
+        } | self.envelope
+        return state, args
 
 
 class TPDLearner(ArbitraryDriver):
@@ -139,7 +163,6 @@ class TPDModule(BaseLPSE2D):
         try:
             return super().init_modules()
         except NotImplementedError:
-            # check if shape is etamodel
             modules = {}
             if "generative" == self.cfg["drivers"]["E0"]["shape"].casefold():
                 modules = {"laser": GenerativeDriver(self.cfg)}
@@ -153,6 +176,9 @@ class TPDModule(BaseLPSE2D):
                     replace=jnp.array(np.random.uniform(-1, 1, self.cfg["drivers"]["E0"]["num_colors"])),
                 )
                 modules = {"laser": laser_module}
+
+            elif "zero_lines" == self.cfg["drivers"]["E0"]["shape"].casefold():
+                modules = {"laser": ZeroLiner(self.cfg)}
 
             else:
                 raise NotImplementedError("Only generative model is supported in this repo")
@@ -193,11 +219,15 @@ class TPDModule(BaseLPSE2D):
         return filter_value_and_grad(self.__call__, has_aux=True)(trainable_modules, args)
 
     def post_process(self, run_output: Dict, td: str) -> Dict:
+        metrics = {}
         if isinstance(run_output, tuple):
             val, run_output = run_output
+            metrics["loss"] = float(val)
 
         ppo = super().post_process(run_output, td)
-        metrics = postprocess_bandwidth(run_output["args"]["drivers"], self, td, ppo["x"]["background_density"].data[0])
+        bw_metrics = postprocess_bandwidth(
+            run_output["args"]["drivers"], self, td, ppo["x"]["background_density"].data[0]
+        )
         fields = ppo["x"]
         dx = fields.coords["x (um)"].data[1] - fields.coords["x (um)"].data[0]
         dy = fields.coords["y (um)"].data[1] - fields.coords["y (um)"].data[0]
@@ -206,10 +236,12 @@ class TPDModule(BaseLPSE2D):
         tint = 5.0  # last tint ps
         it = int(tint / dt)
         total_esq = np.abs(fields["ex"][-it:].data) ** 2 + np.abs(fields["ey"][-it:].data ** 2) * dx * dy * dt
-        metrics[f"total_e_sq_last_{tint}_ps".replace(".", "p")] = float(np.sum(total_esq))
-        metrics[f"log10_total_e_sq_last_{tint}_ps".replace(".", "p")] = float(
-            np.log10(metrics[f"total_e_sq_last_{tint}_ps".replace(".", "p")])
+        bw_metrics[f"total_e_sq_last_{tint}_ps".replace(".", "p")] = float(np.sum(total_esq))
+        bw_metrics[f"log10_total_e_sq_last_{tint}_ps".replace(".", "p")] = float(
+            np.log10(bw_metrics[f"total_e_sq_last_{tint}_ps".replace(".", "p")])
         )
-        metrics[f"growth_rate_last_{tint}_ps".replace(".", "p")] = float(np.mean(np.gradient(np.log(total_esq), dt)))
-        metrics["loss"] = float(val)
+        bw_metrics[f"growth_rate_last_{tint}_ps".replace(".", "p")] = float(np.mean(np.gradient(np.log(total_esq), dt)))
+
+        metrics.update(bw_metrics)
+
         return {"k": ppo["k"], "x": fields, "metrics": metrics}
