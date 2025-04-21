@@ -91,7 +91,7 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
         )
         print(f"{htex.workers_per_node=}")
 
-    return Config(executors=[htex], retries=0)
+    return Config(executors=[htex], retries=2)
 
 
 def get_checkpoint(resume_dict) -> Tuple[str, OptState]:
