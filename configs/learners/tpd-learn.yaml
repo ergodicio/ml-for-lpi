@@ -32,7 +32,7 @@ drivers:
         learned: true 
         seed: 42
       nn:
-        width_size: 16
+        width_size: 64
         out_size: 64
         in_size: 3
         depth: 3
@@ -50,13 +50,13 @@ grid:
   ymax: 3um
   ymin: -3um
 parsl:
-  provider: local
-  nodes: 5
+  provider: gpu
+  nodes: 6
   walltime: 01:00:00
 
 mlflow:
   experiment: learn-64lines
-  run: 200datapoints
+  run: 504dp
 save:
   fields:
     t:
@@ -92,7 +92,7 @@ units:
   reference ion temperature: 1000eV
 opt:
   learning_rate: 0.001
-  batch_size: 20
+  batch_size: 24
   decay_steps: 100000
   method: optax
   metric_time_in_ps: 6.0

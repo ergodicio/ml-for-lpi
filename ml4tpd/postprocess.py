@@ -2,6 +2,9 @@ from jax import vmap
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import scienceplots
+
+plt.style.use(["science", "grid", "no-latex"])
 
 
 def calc_coherence(lpse_module, used_driver, density):
@@ -59,20 +62,18 @@ def plot_coherence(lpse_module, used_driver, td, density):
 
 def plot_bandwidth(e0, td):
     dw_over_w = e0["delta_omega"]  # / cfg["units"]["derived"]["w0"] - 1
-    fig, ax = plt.subplots(1, 3, figsize=(13, 5), tight_layout=True)
+    fig, ax = plt.subplots(1, 3, figsize=(7, 3), tight_layout=True)
     ax[0].plot(dw_over_w, e0["intensities"], "o")
-    ax[0].grid()
     ax[0].set_xlabel(r"$\Delta \omega / \omega_0$", fontsize=14)
-    ax[0].set_ylabel("$|E|$", fontsize=14)
+    ax[0].set_ylabel("$|E|^2$", fontsize=14)
     ax[1].semilogy(dw_over_w, e0["intensities"], "o")
-    ax[1].grid()
     ax[1].set_xlabel(r"$\Delta \omega / \omega_0$", fontsize=14)
-    ax[1].set_ylabel("$|E|$", fontsize=14)
+    ax[1].set_ylabel("$|E|^2$", fontsize=14)
     ax[2].plot(dw_over_w, e0["phases"], "o")
-    ax[2].grid()
     ax[2].set_xlabel(r"$\Delta \omega / \omega_0$", fontsize=14)
     ax[2].set_ylabel(r"$\angle E$", fontsize=14)
     plt.savefig(os.path.join(td, "driver", "driver_that_was_used.png"), bbox_inches="tight")
+    plt.savefig(os.path.join(td, "driver", "driver_that_was_used.pdf"), bbox_inches="tight")
     plt.close()
 
 

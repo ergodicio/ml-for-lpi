@@ -81,9 +81,9 @@ def train_model(_cfg_path):
         init_value=cfg["opt"]["learning_rate"], decay_steps=cfg["opt"]["decay_steps"]
     )
 
-    temperatures = np.linspace(2000, 4000, 5)
-    gradient_scale_lengths = np.linspace(200, 600, 5)
-    intensities = np.linspace(1e14, 1e15, 8)
+    temperatures = np.round(np.linspace(2000, 4000, 7), 2)
+    gradient_scale_lengths = np.round(np.linspace(200, 600, 9), 2)
+    intensities = np.array([np.float64(f"{x:.2e}") for x in np.linspace(1e14, 1e15, 8)])
 
     all_training_data = list(product(temperatures, gradient_scale_lengths, intensities))
     num_batches = len(all_training_data) // cfg["opt"]["batch_size"]
@@ -126,8 +126,8 @@ def train_model(_cfg_path):
                             run_name = f"epoch-{i}-batch-{j}-sim-{k}"
                             print(f"{i=}, {j=}, {k=} -- _Training Data: {_training_data}")
                             export = np.random.choice([True, False], p=[0.25, 0.75])  # if j % 1 == 0 else False
-                            orig_cfg["units"]["reference electron temperature"] = f"{_training_data[0]:.3f} eV"
-                            orig_cfg["density"]["gradient scale length"] = f"{_training_data[1]:.3f} um"
+                            orig_cfg["units"]["reference electron temperature"] = f"{_training_data[0]:.2f} eV"
+                            orig_cfg["density"]["gradient scale length"] = f"{_training_data[1]:.2f} um"
                             orig_cfg["units"]["laser intensity"] = f"{_training_data[2]:.2e} W/cm^2"
                             orig_cfg["grid"]["dt"] = f"{np.random.uniform(1, 3):.3f} fs"
                             orig_cfg["mlflow"]["run"] = run_name

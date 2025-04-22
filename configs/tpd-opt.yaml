@@ -47,9 +47,10 @@ grid:
 parsl:
   provider: local
   nodes: 128
+  walltime: 01:00:00
 
 mlflow:
-  experiment: opt-64lines-ensembles
+  experiment: opt-64lines-504points
   run: temperature=2000.0-gsl=333.3-intensity=7.00e+14
 save:
   fields:
@@ -85,7 +86,7 @@ units:
   reference electron temperature: 2000 eV
   reference ion temperature: 1000eV
 opt:
-  learning_rate: 0.1
+  learning_rate: 0.01
   batch_size: 1
   decay_steps: 100000
   method: scipy
