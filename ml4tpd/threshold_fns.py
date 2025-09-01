@@ -1,8 +1,6 @@
-from typing import Dict
-
-import logging, os
-from contextlib import redirect_stdout, redirect_stderr
-from scipy.optimize import OptimizeResult
+from typing import Dict, Tuple
+import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -55,19 +53,20 @@ def run_one_val_and_grad(run_id: str, _cfg_path: str):
     import equinox as eqx
 
     from adept import ergoExo
-
-    from ml4tpd import TPDModule
+    from ml4tpd import TPDThresholdModule
 
     with open(_cfg_path, "r") as fi:
         cfg = yaml.safe_load(fi)
 
     exo = ergoExo(mlflow_run_id=run_id, mlflow_nested=True)
-    modules = exo.setup(cfg, adept_module=TPDModule)
+    modules = exo.setup(cfg, adept_module=TPDThresholdModule)
     diff_modules, static_modules = {}, {}
     diff_modules["laser"], static_modules["laser"] = eqx.partition(
         modules["laser"], modules["laser"].get_partition_spec()
     )
     val, grad, (sol, ppo, _) = exo.val_and_grad(diff_modules, args={"static_modules": static_modules})
+    # run_output, ppo, _ = exo(diff_modules, args={"static_modules": static_modules})
+    # val = run_output[0]
 
     return val, grad
 
@@ -235,7 +234,7 @@ def optax_loop(orig_cfg: Dict, modules: Dict):
     clear_xla_cache()
 
 
-def scipy_loop(orig_cfg: Dict, modules: Dict) -> OptimizeResult:
+def scipy_loop(orig_cfg: Dict, modules: Dict):
     """
     Performs the optimization loop using scipy.
 
@@ -302,102 +301,3 @@ def scipy_loop(orig_cfg: Dict, modules: Dict) -> OptimizeResult:
     result = fitter.fit()
 
     return result
-
-
-def run_opt(_cfg_path: str):
-    """
-    Sets up and runs the parent run which is the optimization loop
-
-    Args:
-        _cfg_path: str: Path to the config file
-
-
-    """
-    import jax
-    from copy import deepcopy
-    from adept import ergoExo
-    from adept import utils as adept_utils
-    from ml4tpd import TPDModule
-
-    # jax.config.update("jax_platform_name", "cpu")
-    # jax.config.update("jax_enable_x64", True)
-
-    import yaml, mlflow, tempfile, os
-
-    with open(_cfg_path, "r") as fi:
-        cfg = yaml.safe_load(fi)
-
-    if cfg["opt"]["method"] == "optax":
-        optimization_loop = optax_loop
-    elif cfg["opt"]["method"] == "scipy":
-        optimization_loop = scipy_loop
-    else:
-        raise NotImplementedError(f"Optimization method {cfg['opt']['method']} not implemented.")
-
-    _tt = cfg["units"]["reference electron temperature"]
-    _gsl = cfg["density"]["gradient scale length"]
-    _intensity = cfg["units"]["laser intensity"]
-
-    # cfg["mlflow"]["run"] = f"temperature={_tt}-gsl={_gsl}-intensity={_intensity}"
-    mlflow.set_experiment(cfg["mlflow"]["experiment"])
-
-    with mlflow.start_run(run_name=cfg["mlflow"]["run"]) as mlflow_run:
-        with tempfile.TemporaryDirectory(dir=BASE_TEMPDIR) as td:
-            with open(os.path.join(td, "config.yaml"), "w") as fi:
-                yaml.dump(cfg, fi)
-            mlflow.log_artifacts(td)
-        # adept_utils.log_params(cfg)
-
-        parent_run_id = mlflow_run.info.run_id
-        orig_cfg = deepcopy(cfg)
-
-    exo = ergoExo(mlflow_run_id=parent_run_id, mlflow_nested=False)
-    modules = exo.setup(cfg, adept_module=TPDModule)
-
-    with mlflow.start_run(run_id=parent_run_id, log_system_metrics=True) as mlflow_run:
-        optimization_loop(orig_cfg, modules)
-
-    # Final cleanup after entire optimization run
-    logger.info("Performing final XLA cache cleanup after optimization run")
-    clear_xla_cache()
-
-    return mlflow_run
-
-
-def run_opt_with_retry(config_path, max_retries=3):
-    from botocore.exceptions import ClientError
-    import time
-    import random
-    
-    for attempt in range(max_retries):
-        try:
-            return run_opt(config_path)
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            error_message = e.response['Error']['Message']
-            print(f"AWS ClientError on attempt {attempt + 1}: {error_code} - {error_message}")
-            
-            if attempt < max_retries - 1:
-                # Exponential backoff with jitter
-                delay = (2 ** attempt) + random.uniform(0, 1)
-                time.sleep(delay)
-            else:
-                raise
-
-if __name__ == "__main__":
-    import argparse, mlflow
-
-    parser = argparse.ArgumentParser(description="Run TPD training.")
-    parser.add_argument("--config", type=str, help="The config file")
-    parser.add_argument("--run_id", type=str, help="The run id")
-    args = parser.parse_args()
-
-    if args.run_id is not None:
-        run_id = args.run_id
-        cfg_path = os.path.join(mlflow.get_run(run_id).info.artifact_uri, "config.yaml")
-    else:
-        cfg_path = args.config
-
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-
-    mlflow_run = run_opt(cfg_path)
