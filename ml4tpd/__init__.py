@@ -1,1 +1,1 @@
-from .module import TPDModule
+from .module import TPDModule, TPDThresholdModule

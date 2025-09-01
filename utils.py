@@ -31,7 +31,8 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
                 worker_init="source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
                         export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                         export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
-                        export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'",
+                        export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'; \
+                        module unload cudatoolkit;",
                 init_blocks=1,
                 max_blocks=1,
                 nodes_per_block=1,
@@ -49,7 +50,8 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
                 worker_init="source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
                         export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                         export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
-                        export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'",
+                        export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'; \
+                        module unload cudatoolkit;",
                 nodes_per_block=1,
                 launcher=SrunLauncher(overrides="-c 32 --gpus-per-node 4"),
                 cmd_timeout=120,
@@ -68,16 +70,17 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
     elif parsl_provider == "gpu":
 
         this_provider = SlurmProvider
-        sched_args = ["#SBATCH -C gpu", "#SBATCH --qos=regular"]
+        sched_args = ["#SBATCH -C gpu&hbm80g", "#SBATCH --qos=regular"]
         provider_args = dict(
             partition=None,
-            account="m4490_g",
+            account="m5057_g",
             scheduler_options="\n".join(sched_args),
             worker_init="export SLURM_CPU_BIND='cores';\
                     export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
                     source /pscratch/sd/a/archis/venvs/ml-for-lpi/bin/activate; \
                     export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
-                    export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'",
+                    export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'; \
+                    module unload cudatoolkit;",
             launcher=SrunLauncher(overrides="--gpus-per-node 4 -c 128"),
             walltime=walltime,
             cmd_timeout=120,
@@ -89,7 +92,6 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
         htex = HighThroughputExecutor(
             available_accelerators=4, label="tpd-learn", provider=this_provider(**provider_args), cpu_affinity="block"
         )
-        print(f"{htex.workers_per_node=}")
 
     return Config(executors=[htex], retries=2)
 

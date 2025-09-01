@@ -2,9 +2,12 @@ from typing import Dict
 import numpy as np
 from astropy.units import Quantity as _Q
 
-from jax import numpy as jnp, tree_util as jtu, nn as jnn
-from equinox import combine, tree_at, filter_value_and_grad, Module, is_array, nn as eqx_nn
+from jax import numpy as jnp, tree_util as jtu, nn as jnn, value_and_grad, jit
+from equinox import combine, tree_at, filter_value_and_grad, Module, is_array, nn as eqx_nn, filter_jit
 from jax.random import normal, PRNGKey, uniform, split
+from jax.debug import print as jax_print
+import optimistix as optmx
+
 
 from adept.lpse2d import BaseLPSE2D, ArbitraryDriver
 from adept._lpse2d.modules import driver
@@ -53,7 +56,6 @@ class LearnedSpacer(ArbitraryDriver):
         self.delta_omega_max = cfg["drivers"]["E0"]["delta_omega_max"]
 
     def __call__(self, state: Dict, args: Dict) -> tuple:
-
         delta_omega = jnp.arange(self.first_delta_omega, self.delta_omega_max, self.dw_spacing)
         intensities = jnp.ones_like(delta_omega)
         intensities = intensities / jnp.sum(intensities)
@@ -67,7 +69,6 @@ class LearnedSpacer(ArbitraryDriver):
 
 
 def reinitialize_nns(model: Module, key: PRNGKey) -> Module:
-
     weight_keys = split(key, num=len(model.layers))
     bias_keys = split(key, num=len(model.layers))
 
@@ -88,7 +89,6 @@ def reinitialize_nns(model: Module, key: PRNGKey) -> Module:
 
 
 class TPDLearner(ArbitraryDriver):
-
     amp_model: Module
     phase_model: Module
     inputs: np.array
@@ -110,6 +110,15 @@ class TPDLearner(ArbitraryDriver):
             raise NotImplementedError(
                 f"Activation function {cfg['drivers']['E0']['params']['nn']['activation']} not supported"
             )
+        
+        Te = _Q(cfg["units"]["reference electron temperature"]).to("keV").value
+        Ln = _Q(cfg["density"]["gradient scale length"]).to("um").value
+        I0 = _Q(cfg["units"]["laser intensity"]).to("W/cm^2").value
+
+        Te = (Te - 3.0) / 1.0
+        Ln = (Ln - 400.0) / 200
+        I0 = (np.log10(I0) - 14.5) / 0.5
+        self.inputs = np.array((Te, Ln, I0))
 
         nn_params = {
             "in_size": cfg["drivers"]["E0"]["params"]["nn"]["in_size"],
@@ -129,14 +138,7 @@ class TPDLearner(ArbitraryDriver):
 
         reinitialize_nns(self.phase_model, key=PRNGKey(seed=np.random.randint(2**20)))
 
-        Te = _Q(cfg["units"]["reference electron temperature"]).to("keV").value
-        Ln = _Q(cfg["density"]["gradient scale length"]).to("um").value
-        I0 = _Q(cfg["units"]["laser intensity"]).to("W/cm^2").value
-
-        Te = (Te - 3.0) / 1.0
-        Ln = (Ln - 400.0) / 200
-        I0 = (np.log10(I0) - 14.5) / 0.5
-        self.inputs = np.array((Te, Ln, I0))
+        
 
     def get_partition_spec(self):
         filter_spec = jtu.tree_map(lambda _: False, self)
@@ -162,7 +164,6 @@ class TPDLearner(ArbitraryDriver):
         return filter_spec
 
     def __call__(self, state: Dict, args: Dict) -> tuple:
-
         ints_and_phases = {
             "amps": self.amp_model(jnp.array(self.inputs)),
             "phases": self.phase_model(jnp.array(self.inputs)),
@@ -309,13 +310,12 @@ class TPDModule(BaseLPSE2D):
         return units_dict
 
     def __call__(self, trainable_modules, args=None):
-
         if args is not None:
             if "static_modules" in args:
                 trainable_modules["laser"] = combine(trainable_modules["laser"], args["static_modules"]["laser"])
 
         out_dict = super().__call__(trainable_modules, args)
-        e_sq = jnp.sum(out_dict["solver result"].ys["default"]["e_sq"][self.metric_timesteps :]) * self.metric_dt
+        e_sq = jnp.mean(out_dict["solver result"].ys["default"]["e_sq"][self.metric_timesteps :]) #* self.metric_dt
         log10e_sq = jnp.log10(e_sq)
         return log10e_sq, out_dict
 
@@ -337,15 +337,100 @@ class TPDModule(BaseLPSE2D):
         dy = fields.coords["y (um)"].data[1] - fields.coords["y (um)"].data[0]
         dt = fields.coords["t (ps)"].data[1] - fields.coords["t (ps)"].data[0]
 
-        tint = 5.0  # last tint ps
+        tint = self.cfg["opt"]["metric_time_in_ps"]
         it = int(tint / dt)
-        total_esq = np.abs(fields["ex"][-it:].data) ** 2 + np.abs(fields["ey"][-it:].data ** 2) * dx * dy * dt
-        bw_metrics[f"total_e_sq_last_{tint}_ps".replace(".", "p")] = float(np.sum(total_esq))
-        bw_metrics[f"log10_total_e_sq_last_{tint}_ps".replace(".", "p")] = float(
-            np.log10(bw_metrics[f"total_e_sq_last_{tint}_ps".replace(".", "p")])
+        total_esq = np.abs(fields["ex"][it:].data) ** 2 + np.abs(fields["ey"][it:].data ** 2) * dx * dy * dt
+        bw_metrics[f"mean_e_sq_{tint}_ps_to_end".replace(".", "p")] = float(np.mean(total_esq))
+        bw_metrics[f"log10_mean_e_sq_{tint}_ps_to_end".replace(".", "p")] = float(
+            np.log10(bw_metrics[f"mean_e_sq_{tint}_ps_to_end".replace(".", "p")])
         )
-        bw_metrics[f"growth_rate_last_{tint}_ps".replace(".", "p")] = float(np.mean(np.gradient(np.log(total_esq), dt)))
+        bw_metrics[f"growth_rate_{tint}_ps_to_end".replace(".", "p")] = float(
+            np.mean(np.gradient(np.log(total_esq), dt))
+        )
 
         metrics.update(bw_metrics)
 
         return {"k": ppo["k"], "x": fields, "metrics": metrics}
+
+
+class ArbitrarywIntensityDriver(ArbitraryDriver):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+    def __call__(self, state, args):
+        state, args = super().__call__(state, args)
+        args["drivers"]["E0"]["intensities"] *= args["laser_intensity_factor"]
+        return state, args
+
+
+class TPDThresholdModule(TPDModule):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+    def init_modules(self):
+        self.metric_timesteps = np.argmin(
+            np.abs(self.cfg["save"]["default"]["t"]["ax"] - self.cfg["opt"]["metric_time_in_ps"])
+        )
+        self.metric_dt = self.cfg["save"]["default"]["t"]["ax"][1] - self.cfg["save"]["default"]["t"]["ax"][0]
+        modules = {}
+        if "arbitrarywintensity" == self.cfg["drivers"]["E0"]["shape"].casefold():
+            modules = {"laser": ArbitrarywIntensityDriver(self.cfg)}
+        else:
+            raise NotImplementedError
+        self.grad_call = False
+        return modules
+
+    def last_sim(self, intensity, args):
+        print("running a sim")
+        trainable_modules = args["diff_modules"]
+        args["laser_intensity_factor"] = intensity / float(self.cfg["units"]["laser intensity"][:-7])
+        loss_val, aux_dict = super().__call__(trainable_modules, args)
+        distance_to_target = loss_val - 2.0
+        return distance_to_target, aux_dict
+
+    def one_sim(self, intensity, args):
+        distance_to_target, _ = self.last_sim(intensity, args)
+        jax_print("intensity = {i}, distance = {x}", i=intensity, x=distance_to_target)
+        return distance_to_target
+
+    def __call__(self, trainable_modules, args=None):
+        """
+        Finds the threshold and returns the negative of it
+
+        :param trainable_modules: Description
+        :param args: Description
+        """
+        # self.grad_call = False
+        args["diff_modules"] = trainable_modules
+        optmx_sol = optmx.root_find(
+            self.one_sim,
+            solver=optmx.Bisection(rtol=0.01, atol=0.05),
+            # solver=optmx.Newton(rtol=0.01, atol=0.05),
+            # solver=optmx.Chord(rtol=0.01, atol=0.05),
+            y0=self.cfg["units"]["derived"]["broadband threshold"] * 1e14,
+            args=args,
+            options={
+                "lower": self.cfg["units"]["derived"]["I_thresh"] * 1e14,
+                "upper": 10 * self.cfg["units"]["derived"]["I_thresh"] * 1e14,
+            },
+            has_aux=False,
+        )
+        threshold_intensity = optmx_sol.value
+        _, aux = self.last_sim(threshold_intensity, args)
+        aux["steps"] = optmx_sol.stats["num_steps"]
+        aux["threshold_intensity_1e14"] = threshold_intensity / 1e14
+        return -threshold_intensity, aux
+
+    def vg(self, trainable_modules, args=None):
+        self.grad_call = True
+        return filter_jit(filter_value_and_grad(self.__call__, has_aux=True))(trainable_modules, args)
+
+    def post_process(self, run_output, td):
+        out_dict = super().post_process(run_output, td)
+        if not self.grad_call:
+            _, run_output = run_output
+
+        out_dict["metrics"]["threshold_intensity_1e14"] = float(run_output["threshold_intensity_1e14"])
+        out_dict["metrics"]["num_steps"] = run_output["steps"]
+
+        return out_dict

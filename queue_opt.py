@@ -42,7 +42,7 @@ def load_and_make_folders(base_cfg_path: str, _tt, _gsl, _intensity, _seed) -> s
 
 def _queue_run_(_cfg_path):
 
-    with open("nersc-gpu-shared-base.sh", "r") as fh:
+    with open(os.path.join(os.getcwd(), "jobscripts", "nersc-gpu-shared-base.sh"), "r") as fh:
         base_job = fh.read()
 
     with open(os.path.join(os.getcwd(), "new_job.sh"), "w") as job_file:
@@ -55,17 +55,22 @@ def _queue_run_(_cfg_path):
 
 if __name__ == "__main__":
 
-    temperatures = np.linspace(2000, 4000, 5)
-    gradient_scale_lengths = np.linspace(200, 600, 4)
-    intensities = np.linspace(1e14, 1e15, 4)
+    temperatures = np.linspace(2000, 4000, 7)
+    gradient_scale_lengths = np.linspace(200, 600, 9)
+    intensities = np.linspace(1e14, 1e15, 8)
 
     all_hps = list(product(temperatures, gradient_scale_lengths, intensities))
     seeds = np.random.randint(0, 10000, len(all_hps))
     all_hps = [t + (d,) for t, d in zip(all_hps, seeds)]
 
-    for _ in range(2):
-        for tt, gsl, intensity, seed in all_hps:
-            cfg_path = load_and_make_folders("configs/tpd-opt.yaml", tt, gsl, intensity, seed)
-            _queue_run_(cfg_path)
+    np.random.shuffle(all_hps)
 
-    os.system("rm new_job.sh")
+    for _ in range(3):
+        for tt, gsl, intensity, seed in all_hps:
+            print(tt, gsl, intensity, seed)
+            cfg_path = load_and_make_folders("configs/tpd-opt.yaml", tt, gsl, intensity, seed)
+            # _queue_run_(cfg_path)
+            print(cfg_path)
+            raise ValueError
+
+    # os.system("rm new_job.sh")

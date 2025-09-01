@@ -33,20 +33,21 @@ def scan_loop(_cfg_path):
 
         return val
 
-    temperatures = np.linspace(2000, 4000, 5)
-    gradient_scale_lengths = np.linspace(200, 600, 4)
-    intensities = np.linspace(1e14, 1e15, 4)
-    num_colors = np.linspace(16, 128, 15)
+    temperatures = np.linspace(2000, 4000, 5)[-1:]
+    gradient_scale_lengths = np.linspace(200, 600, 4)[-3:-2]
+    intensities = np.linspace(3e14, 7e14, 5)
+    num_colors = 2 ** np.linspace(1, 8, 8)
 
     all_hps = list(product(temperatures, gradient_scale_lengths, intensities, num_colors))
-    all_hps = all_hps[600:]
+    # all_hps = all_hps[10:1000]
     with open(_cfg_path, "r") as fi:
         orig_cfg = yaml.safe_load(fi)
 
-    orig_cfg["mlflow"]["experiment"] = "num-color-scan"
-    orig_cfg["parsl"]["nodes"] = int(os.environ["SLURM_NNODES"])
+    orig_cfg["mlflow"]["experiment"] = "num-color-and-intensity-scan-100ps"
+    orig_cfg["parsl"]["nodes"] = 4  # int(os.environ["SLURM_NNODES"]) if "SLURM_NNODES" in os.environ else 1
+    orig_cfg["parsl"]["provider"] = "local"
 
-    parsl_config = setup_parsl(orig_cfg["parsl"]["provider"], 4, nodes=orig_cfg["parsl"]["nodes"])
+    parsl_config = setup_parsl(orig_cfg["parsl"]["provider"], 4, nodes=orig_cfg["parsl"]["nodes"], walltime="01:00:00")
     run_once = python_app(run_once)
 
     mlflow.set_experiment(orig_cfg["mlflow"]["experiment"])
@@ -81,7 +82,7 @@ def scan_loop(_cfg_path):
                 orig_cfg["units"]["laser intensity"] = f"{intensity} W/cm^2"
                 orig_cfg["density"]["gradient scale length"] = f"{gsl} um"
                 vals[run_name] = []
-                for i in range(8):
+                for i in range(1):
                     with open(new_cfg_path := os.path.join(_td, f"{str(uuid.uuid4())}.yaml"), "w") as fi:
                         yaml.dump(orig_cfg, fi)
 
