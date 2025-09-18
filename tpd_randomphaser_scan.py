@@ -1,5 +1,5 @@
 import logging, os
-from utils import setup_parsl
+from ml4tpd.parsl_utils import setup_parsl
 
 
 import parsl
