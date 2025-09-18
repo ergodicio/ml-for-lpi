@@ -3,7 +3,7 @@ import parsl
 from parsl import python_app
 from itertools import product
 
-from utils import setup_parsl
+from ml4tpd.parsl_utils import setup_parsl
 
 logger = logging.getLogger(__name__)
 

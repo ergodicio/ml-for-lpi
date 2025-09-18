@@ -4,6 +4,25 @@ import matplotlib.pyplot as plt
 import os
 
 
+def calc_tpd_threshold_intensity(Te: float, Ln: float, w0: float) -> float:
+    """
+    Calculate the TPD threshold intensity
+
+    :param Te:
+    :return: intensity
+    """
+
+    c = 2.99792458e10
+    me_keV = 510.998946  # keV/c^2
+    me_cgs = 9.10938291e-28
+    e = 4.8032068e-10
+
+    vte = np.sqrt(Te / me_keV) * c
+    I_threshold = 4 * 4.134 * 1 / (8 * np.pi) * (me_cgs * c / e) ** 2 * w0 * vte**2 / (Ln / 100) * 1e-7
+
+    return I_threshold
+
+
 def calc_coherence(lpse_module, used_driver, density):
     def _calc_e0_(t, y, light_wave):
         return lpse_module.diffeqsolve_quants["terms"].vector_field.light.calc_ey_at_one_point(t, y, light_wave)
@@ -49,7 +68,7 @@ def plot_coherence(lpse_module, used_driver, td, density):
     ax.set_xlabel(r"Time delay (in units of $\tau_0$)")
     ax.set_ylabel("Coherence")
     ax.grid()
-    ax.set_title(rf"$\tau_c = {round(metrics['tau_cf']*1000, 2)}$ fs")
+    ax.set_title(rf"$\tau_c = {round(metrics['tau_cf'] * 1000, 2)}$ fs")
     fig.savefig(os.path.join(td, "driver", "coherence.png"), bbox_inches="tight")
 
     plt.close()

@@ -1,6 +1,6 @@
 import logging, os
 from uuid import uuid4
-from utils import setup_parsl
+from ml4tpd.parsl_utils import setup_parsl
 
 
 import parsl
