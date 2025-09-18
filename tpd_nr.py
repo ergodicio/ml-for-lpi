@@ -32,7 +32,7 @@ def run_one_val_and_grad(run_id, cfg_path):
 if __name__ == "__main__":
     import uuid
     from copy import deepcopy
-    from utils import setup_parsl
+    from ml4tpd.parsl_utils import setup_parsl
     from adept import ergoExo
     from adept import utils as adept_utils
     from ml4tpd import TPDModule

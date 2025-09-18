@@ -39,7 +39,7 @@ def train_model(_cfg_path):
 
         return val, grad
 
-    from utils import setup_parsl
+    from ml4tpd.parsl_utils import setup_parsl
     from adept import ergoExo, utils as adept_utils
 
     from ml4tpd import TPDModule
