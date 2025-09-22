@@ -41,7 +41,7 @@ def run_matlab(_cfg_path, bandwidth=False):
                     matlab_cmd = [
                         "matlab",
                         "-batch",
-                        f"addpath('{os.path.abspath('/global/common/software/m4490/matlab-lpse/')}');"
+                        f"addpath('{os.path.abspath('/global/common/software/m4490/lpse-matlab/')}');"
                         + f"log_lpse({intensity}, {gsl}, {str(bandwidth).lower()}, {seed}, '{td}')",
                     ]
                     subprocess.run(matlab_cmd)
