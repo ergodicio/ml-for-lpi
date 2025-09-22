@@ -1,19 +1,20 @@
 density:
   basis: linear
-  gradient scale length: 333.33333um
-  max: 0.3
-  min: 0.2
+  gradient scale length: 400.0um
+  max: 0.28
+  min: 0.18
   noise:
     max: 1.0e-09
     min: 1.0e-10
     type: uniform
+    
 drivers:
   E0:
     delta_omega_max: 0.015
     envelope:
       tc: 200.25ps
       tr: 0.1ps
-      tw: 400ps
+      tw: 4000ps
       xc: 50um
       xr: 0.2um
       xw: 1000um
@@ -33,34 +34,34 @@ drivers:
         seed: 42
 
 grid:
-  boundary_abs_coeff: 1.0e4
-  boundary_width: 3um
-  dt: 0.001ps
-  dx: 30nm
-  low_pass_filter: 0.66
-  tmax: 15.0ps
+  boundary_abs_coeff: 1
+  boundary_width: 3.0um
+  dt: 0.008ps
+  dx: 50nm
+  low_pass_filter: 0.5
+  tmax: 100ps
   tmin: 0.0ns
-  ymax: 3um
-  ymin: -3um
+  ymax: 5um
+  ymin: -5um
 
 
 parsl:
   provider: local
-  nodes: 128
-
+  nodes: 4
+  walltime: 12:00:00
 mlflow:
   experiment: opt-64lines-ensembles
-  run: temperature=2000.0-gsl=333.3-intensity=7.00e+14
+  run: temperature=4000.0-gsl=600.0
 save:
   fields:
     t:
       dt: 1ps
-      tmax: 10ps
+      tmax: 100ps
       tmin: 0ps
-    x:
-      dx: 80nm
-    y:
-      dy: 128nm
+    # x:
+    #   dx: 50nm
+    # y:
+    #   dy: 50nm
 solver: envelope-2d
 terms:
   epw:
@@ -68,13 +69,14 @@ terms:
       x: absorbing
       y: periodic
     damping:
-      collisions: 1.0
+      collisions: 0.1
       landau: true
     density_gradient: true
     linear: true
-    source:
+    source: 
       noise: true
       tpd: true
+      srs: false
   zero_mask: true
 units:
   atomic number: 40
@@ -82,11 +84,14 @@ units:
   ionization state: 6
   laser intensity: 7.0e14 W/cm^2
   laser_wavelength: 351nm
-  reference electron temperature: 2000 eV
+  reference electron temperature: 3200 eV
   reference ion temperature: 1000eV
 opt:
   learning_rate: 0.1
   batch_size: 1
   decay_steps: 100000
   method: scipy
-  metric_time_in_ps: 6.0
+  metric_time_in_ps: 22.5
+  # XLA cache cleanup interval (iterations for scipy, epochs for optax)
+  # Helps prevent memory buildup during long optimization runs
+  cache_cleanup_interval: 1

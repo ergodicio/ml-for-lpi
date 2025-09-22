@@ -12,7 +12,7 @@ from adept.lpse2d import BaseLPSE2D, ArbitraryDriver
 from adept._lpse2d.modules import driver
 
 from .modules.drivers import GenerativeDriver, TPDLearner, ZeroLiner
-from .helpers import postprocess_bandwidth, calc_tpd_threshold_intensity
+from .helpers import postprocess_bandwidth, calc_tpd_threshold_intensity, calc_tpd_broadband_threshold_intensity
 
 
 class TPDModule(BaseLPSE2D):
@@ -57,16 +57,11 @@ class TPDModule(BaseLPSE2D):
         tau0_over_tauc = self.cfg["drivers"]["E0"]["delta_omega_max"]
         Te = _Q(self.cfg["units"]["reference electron temperature"]).to("keV").value
         gradient_scale_length = _Q(self.cfg["density"]["gradient scale length"]).to("um").value
-        I_thresh = calc_tpd_threshold_intensity(Te, Ln=gradient_scale_length, w0=units_dict["w0"])
-        units_dict["monochromatic threshold"] = float(I_thresh)
-        units_dict["broadband threshold"] = float(
-            232
-            * _Q(self.cfg["units"]["reference electron temperature"]).to("keV").value ** 0.75
-            / L ** (2 / 3)
-            / lambda0 ** (4 / 3)
-            * (tau0_over_tauc) ** 0.5
-        )
+        I_thresh = calc_tpd_threshold_intensity(Te, Ln=gradient_scale_length, w0=self.cfg["units"]["derived"]["w0"])
+        I_thresh_broadband = calc_tpd_broadband_threshold_intensity(Te, gradient_scale_length, lambda0, tau0_over_tauc)
 
+        units_dict["monochromatic threshold"] = float(I_thresh)
+        units_dict["broadband threshold"] = float(I_thresh_broadband)
         self.cfg["units"]["derived"]["broadband threshold"] = units_dict["broadband threshold"]
         self.cfg["units"]["derived"]["monochromatic threshold"] = units_dict["monochromatic threshold"]
         return units_dict
@@ -95,6 +90,7 @@ class TPDModule(BaseLPSE2D):
             run_output["args"]["drivers"], self, td, ppo["x"]["background_density"].data[0]
         )
         fields = ppo["x"]
+        series = ppo["series"]
         dx = fields.coords["x (um)"].data[1] - fields.coords["x (um)"].data[0]
         dy = fields.coords["y (um)"].data[1] - fields.coords["y (um)"].data[0]
         dt = fields.coords["t (ps)"].data[1] - fields.coords["t (ps)"].data[0]
@@ -110,9 +106,16 @@ class TPDModule(BaseLPSE2D):
             np.mean(np.gradient(np.log(total_esq), dt))
         )
 
+        series_metrics = {
+            "last_esq": float(series["e_sq"][-1].data),
+            "last_max_phi": float(series["max_phi"][-1].data),
+            "last_log10_e_sq": float(np.log10(series["e_sq"][-1].data)),
+            "last_log10_max_phi": float(np.log10(series["max_phi"][-1].data)),
+        }
+        metrics.update(series_metrics)
         metrics.update(bw_metrics)
 
-        return {"k": ppo["k"], "x": fields, "metrics": metrics}
+        return {"k": ppo["k"], "x": fields, "series": series, "metrics": metrics}
 
 
 class ArbitrarywIntensityDriver(ArbitraryDriver):
