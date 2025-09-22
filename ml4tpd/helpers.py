@@ -4,7 +4,18 @@ import matplotlib.pyplot as plt
 import os
 
 
-def calc_tpd_threshold_intensity(Te: float, Ln: float, w0: float) -> float:
+
+def calc_tpd_broadband_threshold_intensity(Te_keV: float = 1.0, L_um: float = 10.0, lambda0: float = 0.8, tau0_over_tauc: float = 1.0) -> float:
+    return (
+        232
+        * Te_keV ** 0.75
+        / L_um ** (2 / 3)
+        / lambda0 ** (4 / 3)
+        * (tau0_over_tauc) ** 0.5
+    )
+
+
+def calc_tpd_threshold_intensity(Te: float, Ln: float, w0: float = 5366.528681791605) -> float:
     """
     Calculate the TPD threshold intensity
 
