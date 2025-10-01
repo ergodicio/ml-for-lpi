@@ -178,7 +178,7 @@ def calc_loss_and_grads(modules: Dict, epoch: int, orig_cfg: Dict):
         module_path = os.path.join(_td, f"laser.eqx")
         modules["laser"].save(module_path)
         orig_cfg["drivers"]["E0"]["file"] = module_path
-        orig_cfg["grid"]["dt"] = f"{np.random.uniform(1, 3):.3f}fs"
+        orig_cfg["grid"]["dt"] = f"{np.random.uniform(5, 15):.3f}fs"
         with open(_cfg_path := os.path.join(_td, "config.yaml"), "w") as fi:
             yaml.dump(orig_cfg, fi)
 

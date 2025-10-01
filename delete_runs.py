@@ -122,58 +122,59 @@ def delete_failed_temperature_runs(experiment_name: Optional[str] = None) -> Non
         
         # Find failed parent runs starting with "temperature-"
         failed_temperature_runs = []
-        
-        for exp_id in experiment_ids:
-            failed_temperature_runs = client.search_runs(
-                experiment_ids=[exp_id],
-                # Filter runs that have failed status and start with "temperature="
-                filter_string="attribute.status = 'FAILED' AND tags.mlflow.runName LIKE 'temperature=%'",
-                run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY,
-                max_results=10000
-            )
-        
-        if not failed_temperature_runs:
-            print("No failed parent runs starting with 'temperature=' found.")
-            return
-        
-        print(f"Found {len(failed_temperature_runs)} failed parent runs.")
-        
-        total_deleted = 0
-        
-        # For each failed temperature parent run, delete it and its children
-        for parent_run in failed_temperature_runs:
-            parent_run_id = parent_run.info.run_id
-            parent_run_name = parent_run.data.tags.get("mlflow.runName", "")
+
+        for status in ["FAILED", "RUNNING"]:
+            for exp_id in experiment_ids:
+                failed_temperature_runs = client.search_runs(
+                    experiment_ids=[exp_id],
+                    # Filter runs that have failed status and start with "temperature="
+                    filter_string=f"attribute.status = '{status}' AND tags.mlflow.runName LIKE 'temperature=%'",
+                    run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY,
+                    max_results=10000
+                )
             
-            print(f"Processing parent run: {parent_run_name} (ID: {parent_run_id})")
+            if not failed_temperature_runs:
+                print("No failed parent runs starting with 'temperature=' found.")
+                return
             
-            # Find all child runs
-            child_runs = client.search_runs(
-                experiment_ids=experiment_ids,
-                filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'",
-                run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY,
-                max_results=10000
-            )
+            print(f"Found {len(failed_temperature_runs)} {status} parent runs.")
             
-            # Delete child runs first
-            child_deleted_count = 0
-            for child_run in child_runs:
+            total_deleted = 0
+            
+            # For each failed temperature parent run, delete it and its children
+            for parent_run in failed_temperature_runs:
+                parent_run_id = parent_run.info.run_id
+                parent_run_name = parent_run.data.tags.get("mlflow.runName", "")
+                
+                print(f"Processing parent run: {parent_run_name} (ID: {parent_run_id})")
+                
+                # Find all child runs
+                child_runs = client.search_runs(
+                    experiment_ids=experiment_ids,
+                    filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'",
+                    run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY,
+                    max_results=10000
+                )
+                
+                # Delete child runs first
+                child_deleted_count = 0
+                for child_run in child_runs:
+                    try:
+                        client.delete_run(child_run.info.run_id)
+                        child_deleted_count += 1
+                        print(f"  Deleted child run: {child_run.info.run_id}")
+                    except Exception as e:
+                        print(f"  Failed to delete child run {child_run.info.run_id}: {e}")
+                
+                # Delete the parent run
                 try:
-                    client.delete_run(child_run.info.run_id)
-                    child_deleted_count += 1
-                    print(f"  Deleted child run: {child_run.info.run_id}")
+                    client.delete_run(parent_run_id)
+                    print(f"  Deleted parent run: {parent_run_name} (ID: {parent_run_id})")
+                    total_deleted += 1 + child_deleted_count
                 except Exception as e:
-                    print(f"  Failed to delete child run {child_run.info.run_id}: {e}")
+                    print(f"  Failed to delete parent run {parent_run_id}: {e}")
             
-            # Delete the parent run
-            try:
-                client.delete_run(parent_run_id)
-                print(f"  Deleted parent run: {parent_run_name} (ID: {parent_run_id})")
-                total_deleted += 1 + child_deleted_count
-            except Exception as e:
-                print(f"  Failed to delete parent run {parent_run_id}: {e}")
-        
-        print(f"Successfully deleted {total_deleted} runs total (parents + children).")
+            print(f"Successfully deleted {total_deleted} runs total (parents + children).")
         
     except Exception as e:
         print(f"Error: {e}")
