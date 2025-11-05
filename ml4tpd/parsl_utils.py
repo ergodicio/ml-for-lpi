@@ -18,16 +18,27 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
             )
 
         else:
-            this_provider = LocalProvider
-            provider_args = get_multinode_local_provider_args(nodes)
+            if num_gpus > 0:
+                this_provider = LocalProvider
+                provider_args = get_multinode_local_provider_args(nodes)
 
-            htex = HighThroughputExecutor(
-                available_accelerators=num_gpus,
-                label=label,
-                provider=this_provider(**provider_args),
-                max_workers_per_node=4,
-                cpu_affinity="block",
-            )
+                htex = HighThroughputExecutor(
+                    available_accelerators=num_gpus,
+                    label=label,
+                    provider=this_provider(**provider_args),
+                    max_workers_per_node=4,
+                    cpu_affinity="block",
+                )
+            else:
+                this_provider = LocalProvider
+                provider_args = get_multinode_cpu_local_provider_args(nodes)
+                htex = HighThroughputExecutor(
+                    available_accelerators=0,
+                    label=label,
+                    provider=this_provider(**provider_args),
+                    max_workers_per_node=4,
+                    cpu_affinity="block",
+                )
 
     elif parsl_provider == "gpu":
         this_provider = SlurmProvider
@@ -37,7 +48,7 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
             available_accelerators=4, label=label, provider=this_provider(**provider_args), cpu_affinity="block"
         )
 
-    return Config(executors=[htex], retries=1)
+    return Config(executors=[htex], retries=0)
 
 
 def get_singlenode_local_provider_args():
@@ -56,6 +67,25 @@ def get_singlenode_local_provider_args():
 
     return provider_args
 
+def get_multinode_cpu_local_provider_args(nodes):
+    from parsl.launchers import SrunLauncher
+
+    provider_args = dict(
+        worker_init=f"source /global/common/software/m4490/archis/venvs/ml-for-lpi/bin/activate; \
+                        export PYTHONPATH=$PYTHONPATH:/global/homes/a/archis/ml-for-lpi; \
+                        export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
+                        export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'; \
+                        module load matlab; \
+                        export MLFLOW_TRACKING_USERNAME={os.environ['MLFLOW_TRACKING_USERNAME']}; \
+                        export MLFLOW_TRACKING_PASSWORD={os.environ['MLFLOW_TRACKING_PASSWORD']};",
+        nodes_per_block=1,
+        launcher=SrunLauncher(overrides="-c 64"),
+        cmd_timeout=120,
+        init_blocks=1,
+        max_blocks=nodes,
+    )
+
+    return provider_args
 
 def get_multinode_local_provider_args(nodes):
     from parsl.launchers import SrunLauncher
@@ -66,6 +96,7 @@ def get_multinode_local_provider_args(nodes):
                         export BASE_TEMPDIR='/pscratch/sd/a/archis/tmp/'; \
                         export MLFLOW_TRACKING_URI='https://continuum.ergodic.io/experiments/'; \
                         module unload cudatoolkit; \
+                        export XLA_PYTHON_CLIENT_PREALLOCATE=false; \
                         export MLFLOW_TRACKING_USERNAME={os.environ['MLFLOW_TRACKING_USERNAME']}; \
                         export MLFLOW_TRACKING_PASSWORD={os.environ['MLFLOW_TRACKING_PASSWORD']};",
         nodes_per_block=1,
@@ -80,6 +111,7 @@ def get_multinode_local_provider_args(nodes):
 
 def get_gpu_provider_args(nodes, walltime):
     from parsl.launchers import SrunLauncher
+
     sched_args = ["#SBATCH -C gpu&hbm80g", "#SBATCH --qos=regular"]
     provider_args = dict(
         partition=None,

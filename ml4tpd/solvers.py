@@ -1,4 +1,5 @@
 from typing import Dict
+import jax
 import numpy as np
 from astropy.units import Quantity as _Q
 
@@ -11,7 +12,7 @@ import optimistix as optmx
 from adept.lpse2d import BaseLPSE2D, ArbitraryDriver
 from adept._lpse2d.modules import driver
 
-from .modules.drivers import GenerativeDriver, TPDLearner, ZeroLiner
+from .modules.drivers import GenerativeDriver, TPDLearner, ZeroLiner, SmoothArbitraryDriver, TPDGaussianLearner
 from .helpers import postprocess_bandwidth, calc_tpd_threshold_intensity, calc_tpd_broadband_threshold_intensity
 
 
@@ -28,33 +29,42 @@ class TPDModule(BaseLPSE2D):
             return super().init_modules()
         except NotImplementedError:
             modules = {}
-            if "generative" == self.cfg["drivers"]["E0"]["shape"].casefold():
-                modules = {"laser": GenerativeDriver(self.cfg)}
-            elif "learner" == self.cfg["drivers"]["E0"]["shape"].casefold():
-                modules = {"laser": TPDLearner(self.cfg)}
-            elif "random_phaser" == self.cfg["drivers"]["E0"]["shape"].casefold():
-                laser_module = driver.load(self.cfg, ArbitraryDriver)
-                laser_module = tree_at(
-                    lambda tree: tree.phases,
-                    laser_module,
-                    replace=jnp.array(np.random.uniform(-1, 1, self.cfg["drivers"]["E0"]["num_colors"])),
-                )
-                modules = {"laser": laser_module}
-
-            elif "zero_lines" == self.cfg["drivers"]["E0"]["shape"].casefold():
-                modules = {"laser": ZeroLiner(self.cfg)}
-
-            else:
-                raise NotImplementedError("Only generative model is supported in this repo")
+            if "E0" in self.cfg["drivers"]:
+                # DriverModule = choose_driver(self.cfg["drivers"]["E0"]["shape"])
+                DriverModule = self.choose_driver()
+                if "file" in self.cfg["drivers"]["E0"]:
+                    modules["laser"] = driver.load(self.cfg, DriverModule)
+                else:
+                    modules["laser"] = DriverModule(self.cfg)
 
         return modules
+
+    def choose_driver(self):
+        if "generative" == self.cfg["drivers"]["E0"]["shape"].casefold():
+            return GenerativeDriver
+        elif "learner" == self.cfg["drivers"]["E0"]["shape"].casefold():
+            return TPDGaussianLearner
+            # elif "random_phaser" == self.cfg["drivers"]["E0"]["shape"].casefold():
+            #     laser_module = driver.load(self.cfg, ArbitraryDriver)
+            #     laser_module = tree_at(
+            #             lambda tree: tree.phases,
+            #             laser_module,
+            #             replace=jnp.array(np.random.uniform(-1, 1, self.cfg["drivers"]["E0"]["num_colors"])),
+            #         )
+            # return laser_module
+        elif "smooth_arbitrary" == self.cfg["drivers"]["E0"]["shape"].casefold():
+            return SmoothArbitraryDriver
+        elif "zero_lines" == self.cfg["drivers"]["E0"]["shape"].casefold():
+            return ZeroLiner
+        else:
+            raise NotImplementedError(f"{self.cfg['drivers']['E0']['shape']} model is not implemented.")
 
     def write_units(self):
         units_dict = super().write_units()
         L = _Q(self.cfg["density"]["gradient scale length"]).to("um").value
         lambda0 = _Q(self.cfg["units"]["laser_wavelength"]).to("um").value
 
-        tau0_over_tauc = self.cfg["drivers"]["E0"]["delta_omega_max"]
+        tau0_over_tauc = self.cfg["drivers"]["E0"]["delta_omega_max"] * 2
         Te = _Q(self.cfg["units"]["reference electron temperature"]).to("keV").value
         gradient_scale_length = _Q(self.cfg["density"]["gradient scale length"]).to("um").value
         I_thresh = calc_tpd_threshold_intensity(Te, Ln=gradient_scale_length, w0=self.cfg["units"]["derived"]["w0"])
@@ -65,6 +75,20 @@ class TPDModule(BaseLPSE2D):
         self.cfg["units"]["derived"]["broadband threshold"] = units_dict["broadband threshold"]
         self.cfg["units"]["derived"]["monochromatic threshold"] = units_dict["monochromatic threshold"]
         return units_dict
+
+    def init_state_and_args(self):
+        super().init_state_and_args()
+        self.args["nn_inputs"] = self.initialize_nn_inputs()
+
+    def initialize_nn_inputs(self):
+        Te = _Q(self.cfg["units"]["reference electron temperature"]).to("keV").value
+        Ln = _Q(self.cfg["density"]["gradient scale length"]).to("um").value
+        # I0 = _Q(self.cfg["units"]["laser intensity"]).to("W/cm^2").value
+
+        Te = (Te - 3.0) / 1.0
+        Ln = (Ln - 400.0) / 200
+        # I0 = (np.log10(I0) - 14.5) / 0.5
+        return jnp.array((Te, Ln))  # , I0))
 
     def __call__(self, trainable_modules, args=None):
         if args is not None:
@@ -77,7 +101,9 @@ class TPDModule(BaseLPSE2D):
         return log10e_sq, out_dict
 
     def vg(self, trainable_modules, args=None):
-        return filter_value_and_grad(self.__call__, has_aux=True)(trainable_modules, args)
+        (val, run_output), grad = filter_value_and_grad(self.__call__, has_aux=True)(trainable_modules, args)
+        run_output["grad"] = grad
+        return (val, run_output), grad
 
     def post_process(self, run_output: Dict, td: str) -> Dict:
         metrics = {}
@@ -85,7 +111,22 @@ class TPDModule(BaseLPSE2D):
             val, run_output = run_output
             metrics["loss"] = float(val)
 
+        # calculate l2 norm of gradients and log them as metrics
+        if "grad" in run_output and "laser" in run_output["grad"]:
+            grad = run_output["grad"]["laser"]
+            keyed_leaves, _ = jax.tree.flatten_with_path(grad)
+            for key_path, value in keyed_leaves:
+                key = key_path
+                if isinstance(key_path, tuple):
+                    key = "/".join(str(k) for k in key_path)
+                else:
+                    key = str(key_path)
+                l2_grad = np.linalg.norm(value)
+                metrics[f"l2_grad_{key}"] = float(l2_grad)
+
+
         ppo = super().post_process(run_output, td)
+        metrics.update(ppo["metrics"])
         bw_metrics = postprocess_bandwidth(
             run_output["args"]["drivers"], self, td, ppo["x"]["background_density"].data[0]
         )
