@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Tuple
+from typing import List, Tuple
 import logging, os, dill as pickle
 import parsl
 from parsl import python_app
@@ -73,7 +73,8 @@ class BatchResult:
     mean_loss: float
     grad_norm: float
     total_samples: int
-    unstable_samples: int
+    positive_samples: int
+    nan_samples: int
 
 
 @dataclass
@@ -81,15 +82,23 @@ class EpochResult:
     loss_mean: float
     grad_norm_mean: float
     total_samples: int
-    unstable_samples: int
+    positive_samples: int
+    nan_samples: int
 
     @property
-    def unstable_fraction(self) -> float:
-        return float(self.unstable_samples / self.total_samples) if self.total_samples else 0.0
+    def nan_fraction(self) -> float:
+        return float(self.nan_samples / self.total_samples) if self.total_samples else 0.0
+
+    @property
+    def positive_fraction(self) -> float:
+        return float(self.positive_samples / self.total_samples) if self.total_samples else 0.0
 
 
 class TrainingLoop:
     """Controller that runs training epochs, handles validation, and updates intensity limits."""
+
+    MAX_USEFUL_LOSS = 1e6
+
     def __init__(
         self,
         *,
@@ -124,31 +133,54 @@ class TrainingLoop:
         self.max_epochs = 200
         self.validation_interval = 3
 
+        self.training_tmax_ps = 25.0
+        self.training_save_dt_ps = 5.0
+        self.validation_tmax_ps = 100.0
+        self.validation_save_dt_ps = 0.5
+
         self.rng = np.random.default_rng()
+        self.hp_to_base_intensity = {(hp[0], hp[1]): hp[2] for hp in all_hps}
+        self.hp_indices = {(hp[0], hp[1]): idx for idx, hp in enumerate(all_hps)}
+        self.unique_temperatures = sorted({hp[0] for hp in all_hps})
+        self.unique_gradient_scale_lengths = sorted({hp[1] for hp in all_hps})
+
+        validation_cfg = orig_cfg.get("validation", {})
+        temp_subset = validation_cfg.get("temperatures_per_epoch")
+        gsl_subset = validation_cfg.get("gradient_scale_lengths_per_epoch")
+        if temp_subset is None:
+            temp_subset = len(self.unique_temperatures)
+        if gsl_subset is None:
+            gsl_subset = len(self.unique_gradient_scale_lengths)
+        self.validation_temperatures_per_epoch = max(1, int(temp_subset)) if self.unique_temperatures else 0
+        self.validation_gsls_per_epoch = max(1, int(gsl_subset)) if self.unique_gradient_scale_lengths else 0
+        intensity_scan_cfg = validation_cfg.get("intensity_scan", {})
+        self.validation_intensity_samples = max(1, int(intensity_scan_cfg.get("num_samples", 1)))
 
         intensity_schedule_cfg = orig_cfg.get("intensity_schedule", {})
-        self.factor_cap_min = float(intensity_schedule_cfg.get("cap_min", 1.0))
+        self.factor_cap_min = float(intensity_schedule_cfg.get("cap_min", 1.1))
         self.factor_cap_max = float(intensity_schedule_cfg.get("cap_max", 2.0))
-        initial_cap = float(intensity_schedule_cfg.get("initial_cap", 1.1))
+        initial_cap = float(intensity_schedule_cfg.get("initial_cap", 1.5))
         self.factor_cap = float(np.clip(initial_cap, self.factor_cap_min, self.factor_cap_max))
         self.factor_cap_growth = float(intensity_schedule_cfg.get("growth_rate", 1.05))
         self.factor_cap_decay = float(intensity_schedule_cfg.get("decay_rate", 0.9))
+        self.floor_step = float(intensity_schedule_cfg.get("floor_step", 0.02))
+        self.floor_margin = float(intensity_schedule_cfg.get("floor_margin", 0.05))
         self.bracket_tolerance = float(intensity_schedule_cfg.get("bracket_tolerance", 0.02))
 
         self.grad_clip_norm = float(orig_cfg.get("opt", {}).get("grad_clip_norm", 10000.0))
         self.hp_states = {
             (hp[0], hp[1]): {"safe": self.factor_cap_min, "unsafe": self.factor_cap_max} for hp in all_hps
         }
+        self.factor_floor = self.factor_cap_min
 
     def run(self, workdir: str) -> float:
         """Execute the full training curriculum and return the final epoch loss."""
         epoch_loss_mean = 0.0
         for epoch in range(self.start_epoch, self.max_epochs):
             epoch_result = self._run_epoch(epoch, workdir)
-            unstable_fraction = epoch_result.unstable_fraction
-            self._update_factor_cap(epoch_result, unstable_fraction)
+            self._update_factor_cap(epoch_result)
             val_loss = self._maybe_run_validation(epoch, workdir)
-            self._log_epoch_metrics(epoch, epoch_result, unstable_fraction, val_loss)
+            self._log_epoch_metrics(epoch, epoch_result, val_loss)
             epoch_loss_mean = epoch_result.loss_mean
         return epoch_loss_mean
 
@@ -157,7 +189,8 @@ class TrainingLoop:
         epoch_losses = []
         epoch_gradnorms = []
         epoch_total_samples = 0
-        epoch_unstable_samples = 0
+        epoch_positive_samples = 0
+        epoch_nan_samples = 0
 
         self.rng.shuffle(self.all_hps)
 
@@ -177,7 +210,8 @@ class TrainingLoop:
             epoch_losses.append(batch_result.mean_loss)
             epoch_gradnorms.append(batch_result.grad_norm)
             epoch_total_samples += batch_result.total_samples
-            epoch_unstable_samples += batch_result.unstable_samples
+            epoch_positive_samples += batch_result.positive_samples
+            epoch_nan_samples += batch_result.nan_samples
 
         loss_mean = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         grad_norm_mean = float(np.mean(epoch_gradnorms)) if epoch_gradnorms else 0.0
@@ -185,7 +219,8 @@ class TrainingLoop:
             loss_mean=loss_mean,
             grad_norm_mean=grad_norm_mean,
             total_samples=epoch_total_samples,
-            unstable_samples=epoch_unstable_samples,
+            positive_samples=epoch_positive_samples,
+            nan_samples=epoch_nan_samples,
         )
 
     def _save_batch_state(self, epoch: int, batch_idx: int, workdir: str) -> str:
@@ -218,9 +253,7 @@ class TrainingLoop:
             )
             val_and_grads.append(
                 self.parsl_run_one_val_and_grad(
-                    parent_run_id=self.parent_run_id,
-                    _run_cfg_path=run_cfg_path,
-                    export=export,
+                    parent_run_id=self.parent_run_id, _run_cfg_path=run_cfg_path, export=export
                 )
             )
 
@@ -230,10 +263,16 @@ class TrainingLoop:
         validation_losses = np.where(validation_losses > 30.0, 30, validation_losses)
         mean_loss = float(np.mean(validation_losses))
 
-        unstable_samples = int(np.sum(~(np.isfinite(raw_validation_losses) & (raw_validation_losses <= 0.0))))
+        finite_mask = np.isfinite(raw_validation_losses)
+        nan_samples = int(np.sum(~finite_mask))
+        positive_samples = int(np.sum(finite_mask & (raw_validation_losses > 0.0)))
+        overflow_mask = finite_mask & (np.abs(raw_validation_losses) >= self.MAX_USEFUL_LOSS)
+        overflow_samples = int(np.sum(overflow_mask))
 
         valid_grad_entries = [
-            grad for loss, grad in vgs if np.isfinite(loss) and self._tree_all_finite(grad["laser"])
+            grad
+            for (loss, grad), is_overflow in zip(vgs, overflow_mask)
+            if np.isfinite(loss) and not is_overflow and self._tree_all_finite(grad["laser"])
         ]
         dropped_grads = len(vgs) - len(valid_grad_entries)
         if valid_grad_entries:
@@ -257,9 +296,8 @@ class TrainingLoop:
             step=epoch * self.num_batches + batch_idx,
         )
         if dropped_grads:
-            mlflow.log_metric(
-                "batch dropped grad count",
-                dropped_grads,
+            mlflow.log_metrics(
+                {"batch dropped grad count": dropped_grads, "batch overflow loss count": overflow_samples},
                 step=epoch * self.num_batches + batch_idx,
             )
 
@@ -271,7 +309,8 @@ class TrainingLoop:
             mean_loss=mean_loss,
             grad_norm=float(np.linalg.norm(flat_grad)),
             total_samples=len(training_data),
-            unstable_samples=unstable_samples,
+            positive_samples=positive_samples,
+            nan_samples=nan_samples + overflow_samples,
         )
 
     def _write_training_sample_config(
@@ -287,14 +326,16 @@ class TrainingLoop:
         tt, gsl, base_intensity = training_example
         export = bool(self.rng.choice([True, False], p=[0.25, 0.75]))
 
-        factor = float(self.rng.uniform(self.factor_cap_min, self.factor_cap))
+        self._apply_training_temporal_settings()
+        factor = self._sample_training_factor()
         intensity = factor * base_intensity
 
         self.orig_cfg["units"]["reference electron temperature"] = f"{tt:.3f} eV"
         self.orig_cfg["density"]["gradient scale length"] = f"{gsl:.3f} um"
         self.orig_cfg["units"]["intensity factor"] = f"{factor:.3f}"
         self.orig_cfg["units"]["laser intensity"] = f"{intensity:.2e} W/cm^2"
-        self.orig_cfg["grid"]["dt"] = f"{self.rng.uniform(6, 8):.3f} fs"
+        self.orig_cfg["grid"]["dt"] = f"{self.rng.uniform(4, 6):.3f} fs"
+        self.orig_cfg["grid"]["dx"] = f"{self.rng.uniform(65, 80):.1f} nm"
         self.orig_cfg["mlflow"]["run"] = (
             f"epoch-{epoch}-batch-{batch_idx}-temperature={tt:.1f}-gsl={gsl:.1f}-intensity={intensity:.2e}"
         )
@@ -310,50 +351,69 @@ class TrainingLoop:
 
         return run_cfg_path, export
 
-    def _update_factor_cap(self, epoch_result: EpochResult, unstable_fraction: float) -> None:
-        """Adjust the intensity cap based on epoch loss and instability frequency."""
-        if epoch_result.loss_mean <= 0 and unstable_fraction == 0.0:
+    def _sample_training_factor(self) -> float:
+        """Draw a training intensity factor within the current floor/cap band."""
+        upper = self.factor_cap
+        lower_target = min(self.factor_floor, upper - self.floor_margin)
+        lower = max(self.factor_cap_min, lower_target)
+        if lower >= upper:
+            lower = max(self.factor_cap_min, upper - 1e-3)
+        return float(self.rng.uniform(lower, upper))
+
+    def _update_factor_cap(self, epoch_result: EpochResult) -> None:
+        """Adjust the intensity cap/floor based on NaN frequency."""
+        nan_fraction = epoch_result.nan_fraction
+        if nan_fraction == 0.0:
             self.factor_cap = min(self.factor_cap * self.factor_cap_growth, self.factor_cap_max)
-        elif epoch_result.loss_mean > 0 or unstable_fraction > 0.2:
+        elif nan_fraction > 0.2:
             self.factor_cap = max(self.factor_cap * self.factor_cap_decay, self.factor_cap_min)
         self.factor_cap = float(np.clip(self.factor_cap, self.factor_cap_min, self.factor_cap_max))
 
+        max_allowed_floor = max(self.factor_cap_min, self.factor_cap - self.floor_margin)
+        if nan_fraction == 0.0:
+            self.factor_floor = min(max_allowed_floor, self.factor_floor + self.floor_step)
+        elif nan_fraction > 0.2:
+            self.factor_floor = max(self.factor_cap_min, min(max_allowed_floor, self.factor_floor - self.floor_step))
+        else:
+            self.factor_floor = min(self.factor_floor, max_allowed_floor)
+
     def _maybe_run_validation(self, epoch: int, workdir: str):
         """Optionally run validation and refine brackets according to the schedule."""
-        if epoch % self.validation_interval != 0:
+        if epoch % self.validation_interval != 0 or not self.hp_states:
             return None
 
         latest_weights_path = os.path.join(workdir, "weights-history", f"weights-e{epoch:02d}-latest.eqx")
         self.modules["laser"].save(latest_weights_path)
 
         validation_tasks = []
-        for idx, (tt, gsl, base_intensity) in enumerate(self.all_hps):
-            hp_key = (tt, gsl)
-            state = self.hp_states[hp_key]
-            bracket_width = state["unsafe"] - state["safe"]
-            factor = (
-                state["safe"] if bracket_width <= self.bracket_tolerance else 0.5 * (state["safe"] + state["unsafe"])
-            )
-            factor = float(np.clip(factor, self.factor_cap_min, self.factor_cap_max))
-
-            validation_cfg_path = self._write_validation_config(
-                epoch=epoch,
-                hp_index=idx,
-                tt=tt,
-                gsl=gsl,
-                base_intensity=base_intensity,
-                factor=factor,
-                weights_path=latest_weights_path,
-                workdir=workdir,
-            )
-
-            validation_tasks.append(
-                (
-                    self.parsl_run_fwd(validation_cfg_path, parent_run_id=self.parent_run_id),
-                    hp_key,
-                    factor,
+        selected_hp_keys = self._select_validation_hp_pairs()
+        for hp_key in selected_hp_keys:
+            tt, gsl = hp_key
+            base_intensity = self.hp_to_base_intensity.get(hp_key)
+            if base_intensity is None:
+                continue
+            hp_index = self.hp_indices.get(hp_key, 0)
+            factors = self._build_validation_factors(hp_key)
+            for scan_idx, factor in enumerate(factors):
+                validation_cfg_path = self._write_validation_config(
+                    epoch=epoch,
+                    hp_index=hp_index,
+                    scan_index=scan_idx,
+                    tt=tt,
+                    gsl=gsl,
+                    base_intensity=base_intensity,
+                    factor=factor,
+                    weights_path=latest_weights_path,
+                    workdir=workdir,
                 )
-            )
+
+                validation_tasks.append(
+                    (
+                        self.parsl_run_fwd(validation_cfg_path, parent_run_id=self.parent_run_id),
+                        hp_key,
+                        factor,
+                    )
+                )
 
         validation_losses = []
         for future, hp_key, factor in validation_tasks:
@@ -369,11 +429,57 @@ class TrainingLoop:
         vals = np.where(vals > 30.0, 30, vals)
         return float(np.mean(vals))
 
+    def _select_validation_hp_pairs(self):
+        """Choose a reduced set of (Te, GSL) pairs to probe during validation."""
+        if not self.hp_states:
+            return []
+        selected_temps = self._sample_population(self.unique_temperatures, self.validation_temperatures_per_epoch)
+        selected_gsls = self._sample_population(
+            self.unique_gradient_scale_lengths, self.validation_gsls_per_epoch
+        )
+        hp_pairs = [(tt, gsl) for tt in selected_temps for gsl in selected_gsls if (tt, gsl) in self.hp_states]
+        if hp_pairs:
+            return hp_pairs
+        all_keys = list(self.hp_states.keys())
+        desired = max(1, self.validation_temperatures_per_epoch * self.validation_gsls_per_epoch)
+        desired = min(desired, len(all_keys))
+        return self._sample_population(all_keys, desired)
+
+    def _sample_population(self, population, sample_size: int):
+        """Sample without replacement from a population of floats/tuples."""
+        items = list(population)
+        if not items:
+            return []
+        if sample_size >= len(items):
+            return list(items)
+        indices = self.rng.choice(len(items), size=sample_size, replace=False)
+        return [items[i] for i in indices]
+
+    def _build_validation_factors(self, hp_key) -> List[float]:
+        """Return the intensity factors to evaluate for one (Te, GSL) pair."""
+        state = self.hp_states[hp_key]
+        if self.validation_intensity_samples == 1:
+            bracket_width = state["unsafe"] - state["safe"]
+            factor = (
+                state["safe"] if bracket_width <= self.bracket_tolerance else 0.5 * (state["safe"] + state["unsafe"])
+            )
+            return [float(np.clip(factor, self.factor_cap_min, self.factor_cap_max))]
+
+        lower = min(state["safe"], state["unsafe"])
+        upper = max(state["safe"], state["unsafe"])
+        lower = max(self.factor_cap_min, lower)
+        upper = min(self.factor_cap_max, upper)
+        if np.isclose(lower, upper):
+            return [float(lower)] * self.validation_intensity_samples
+        factors = np.linspace(lower, upper, self.validation_intensity_samples)
+        return [float(np.clip(f, self.factor_cap_min, self.factor_cap_max)) for f in factors]
+
     def _write_validation_config(
         self,
         *,
         epoch: int,
         hp_index: int,
+        scan_index: int,
         tt: float,
         gsl: float,
         base_intensity: float,
@@ -385,19 +491,24 @@ class TrainingLoop:
         validation_cfg = deepcopy(self.base_cfg)
         intensity = factor * base_intensity
 
-        validation_cfg["save"]["fields"]["t"]["dt"] = "0.25 ps"
-        validation_cfg["grid"]["dt"] = f"{self.rng.uniform(1, 3):.3f} fs"
+        validation_cfg.setdefault("grid", {})["tmax"] = self._format_time(self.validation_tmax_ps)
+        t_field_cfg = validation_cfg.setdefault("save", {}).setdefault("fields", {}).setdefault("t", {})
+        t_field_cfg["dt"] = self._format_time(self.validation_save_dt_ps)
+        t_field_cfg["tmax"] = self._format_time(self.validation_tmax_ps)
+        validation_cfg["grid"]["dt"] = f"{self.rng.uniform(2, 4):.3f} fs"
+        validation_cfg["grid"]["dx"] = f"{self.rng.uniform(65, 80):.1f} nm"
         validation_cfg["drivers"]["E0"]["file"] = weights_path
         validation_cfg["units"]["reference electron temperature"] = f"{tt:.3f} eV"
         validation_cfg["density"]["gradient scale length"] = f"{gsl:.3f} um"
         validation_cfg["units"]["intensity factor"] = f"{factor:.3f}"
         validation_cfg["units"]["laser intensity"] = f"{intensity:.2e} W/cm^2"
-        validation_cfg["mlflow"]["run"] = f"epoch-{epoch}-validation-temperature={tt:.1f}-gsl={gsl:.1f}"
+        validation_cfg["mlflow"]["run"] = (
+            f"epoch-{epoch}-validation-temperature={tt:.1f}-gsl={gsl:.1f}-intensity={intensity:.2e}"
+        )
         validation_cfg["mlflow"]["export"] = "True"
 
         validation_cfg_path = os.path.join(
-            workdir,
-            f"validation-config-epoch={epoch}-hp={hp_index}.yaml",
+            workdir, f"validation-config-epoch={epoch}-hp={hp_index}-scan={scan_index}.yaml"
         )
         with open(validation_cfg_path, "w") as fi:
             yaml.dump(validation_cfg, fi)
@@ -419,19 +530,35 @@ class TrainingLoop:
         leaves, _ = jax.tree_util.tree_flatten(tree)
         return all(np.all(np.isfinite(np.asarray(leaf))) for leaf in leaves)
 
-    def _log_epoch_metrics(
-        self, epoch: int, epoch_result: EpochResult, unstable_fraction: float, val_loss: float
-    ) -> None:
+    @staticmethod
+    def _format_time(value: float, unit: str = "ps") -> str:
+        value_str = f"{value:.6f}".rstrip("0").rstrip(".")
+        return f"{value_str}{unit}"
+
+    def _apply_training_temporal_settings(self) -> None:
+        """Ensure training configs run short windows and save sparsely."""
+        tmax_str = self._format_time(self.training_tmax_ps)
+        save_dt_str = self._format_time(self.training_save_dt_ps)
+        self.orig_cfg.setdefault("grid", {})["tmax"] = tmax_str
+        t_field = self.orig_cfg.setdefault("save", {}).setdefault("fields", {}).setdefault("t", {})
+        t_field["dt"] = save_dt_str
+        t_field["tmax"] = tmax_str
+
+    def _log_epoch_metrics(self, epoch: int, epoch_result: EpochResult, val_loss: float) -> None:
         """Log epoch aggregates and optional validation loss to MLflow."""
         safe_values = [state["safe"] for state in self.hp_states.values()] if self.hp_states else []
         safe_mean = float(np.mean(safe_values)) if safe_values else 0.0
         safe_min = float(np.min(safe_values)) if safe_values else 0.0
+        nan_fraction = epoch_result.nan_fraction
+        positive_fraction = epoch_result.positive_fraction
 
         metrics = {
             "epoch loss": epoch_result.loss_mean,
             "epoch grad norm": epoch_result.grad_norm_mean,
-            "epoch unstable fraction": unstable_fraction,
+            "epoch nan fraction": nan_fraction,
+            "epoch positive fraction": positive_fraction,
             "factor cap": self.factor_cap,
+            "factor floor": self.factor_floor,
             "safe factor mean": safe_mean,
             "safe factor min": safe_min,
         }

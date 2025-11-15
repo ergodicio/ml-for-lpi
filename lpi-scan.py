@@ -22,15 +22,17 @@ else:
     BASE_TEMPDIR = None
 
 
-def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", num_nodes=4, amp_init="uniform"):
+def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", num_nodes=4, amp_init="uniform", bandwidth_run_id=None):
     temperatures = np.round(np.linspace(2000, 4000, 3), 0)
-    gradient_scale_lengths = np.round(np.linspace(200, 600, 5), 0)[-1:]
+    gradient_scale_lengths = np.round(np.linspace(200, 600, 5), 0)
 
     # intensities = np.round(np.linspace(1.0e14, 1.0e15, 16), 3)
     # intensities = np.array([4.0e14, 6.0e14, 8.0e14])
-    # intensity_factors = np.linspace(1.2, 1.5, 6)[-2:-1]
-    intensity_factors = np.linspace(1.0, 1.3, 4)
-    # intensity_factors = np.linspace(1.0, 2.0, 16)
+    # intensity_factors = np.linspace(0.5, 1.5, 11)
+    # intensity_factors = np.linspace(0.2, 0.6, 2)[::-1]
+    # intensity_factors = np.linspace(1.0, 1.6, 7)
+    intensity_factors = np.linspace(2.0, 3.0, 6)
+    
 
     all_hps = list(product(temperatures, gradient_scale_lengths, intensity_factors))
     with open(_cfg_path, "r") as fi:
@@ -40,17 +42,19 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
     orig_cfg["parsl"]["nodes"] = num_nodes
     parsl_config = setup_parsl(parsl_provider, 4 if solver == "adept" else 0, nodes=num_nodes, walltime="8:00:00")
     parsl_run_adept_fwd = python_app(run_adept_fwd_ensemble)
+    # parsl_run_adept_fwd = run_adept_fwd_ensemble
     parsl_run_opt = python_app(run_opt_with_retry)
     # parsl_run_matlab = python_app(run_matlab)
 
-    orig_cfg["mlflow"]["experiment"] = f"{solver}-{shape}-tpd-100ps-smalldxdt"
+    orig_cfg["mlflow"]["experiment"] = "tpd-100ps-matlab-baseline" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
+    # orig_cfg["mlflow"]["experiment"] = "tpd-100ps-adept-validation" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
 
     opt = orig_cfg["opt"]["method"]
     # if "arbitrary" in shape:
     #     orig_cfg["mlflow"]["experiment"] = f"{solver}-{shape}-tpd-100ps-{opt}"
 
     # delete failed and running runs
-    all_hps, all_runs = get_remaining_runs(orig_cfg, all_hps)
+    # all_hps, all_runs = get_remaining_runs(orig_cfg, all_hps)
 
     with parsl.load(parsl_config):
         with tempfile.TemporaryDirectory(dir=BASE_TEMPDIR) as _td:
@@ -72,7 +76,8 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
                         2,
                     )
 
-                    run_name = f"temperature={tt:.1f}-gsl={gsl:.1f}-intensity={intensity:.2e}-dt-{orig_cfg['grid']['dt']}-dx-{orig_cfg['grid']['dx']}"
+                    run_name = f"temperature={tt:.1f}-gsl={gsl:.1f}-intensity={intensity:.2e}-{shape}"
+                    # run_name = f"temperature={tt:.1f}-gsl={gsl:.1f}-intensity={intensity:.2e}-shape-{shape}-noe0yfilter"
                     orig_cfg["mlflow"]["run"] = run_name  # + f"-bounded"
                     # check if run name exists by first searching all runs and then checking if the run name exists
                     # all_runs = mlflow.search_runs(experiment_names=[orig_cfg["mlflow"]["experiment"]])
@@ -87,15 +92,21 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
                         orig_cfg["drivers"]["E0"]["num_colors"] = 32
                         orig_cfg["drivers"]["E0"]["shape"] = shape
                         orig_cfg["drivers"]["E0"]["params"]["amplitudes"]["init"] = amp_init
-                        orig_cfg["drivers"]["E0"]["params"]["amplitudes"]["bounded"] = False
+                        # orig_cfg["drivers"]["E0"]["params"]["amplitudes"]["bounded"] = False
                         # orig_cfg["drivers"]["E0"]["file"] = (
                         #     "s3://public-ergodic-continuum/188547/100c018a6d0b400a8ff22fe830741011/artifacts/laser.eqx"
                         # )
+                    elif shape == "opt":
+                        orig_cfg["drivers"]["E0"]["num_colors"] = 32
+                        orig_cfg["drivers"]["E0"]["shape"] = "smooth_arbitrary"
+                        orig_cfg["drivers"]["E0"]["file"] = (
+                            # f"s3://public-ergodic-continuum/188533/{bandwidth_run_id}/artifacts/driver/used_driver.pkl"
+                            "s3://public-ergodic-continuum/188533/4d2fb0035ca44b5892bd7e9b0015e20f/artifacts/weights-e37-b00.eqx"
+                        )
                         
-
                     orig_cfg["units"]["reference electron temperature"] = f"{tt} eV"
                     orig_cfg["units"]["laser intensity"] = f"{intensity} W/cm^2"
-                    # orig_cfg["units"]["intensity factor"] = f"{intensity_factor}"
+                    orig_cfg["units"]["intensity factor"] = f"{intensity_factor}"
                     orig_cfg["density"]["gradient scale length"] = f"{gsl} um"
 
                     if shape == "random_phaser":
@@ -105,18 +116,18 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
                         yaml.dump(orig_cfg, fi)
 
                     if solver == "adept":
-                        if shape in ["uniform", "random_phaser", "mono"]:
+                        if shape in ["uniform", "random_phaser", "mono", "smooth_arbitrary", "arbitrary", "opt"]:
                             vals[tt, gsl, intensity] = parsl_run_adept_fwd(
                                 _cfg_path=new_cfg_path, num_seeds=1 if shape == "mono" else 2
                             )
-                        elif shape in ["arbitrary", "smooth_arbitrary"]:
-                            vals[tt, gsl, intensity] = parsl_run_opt(new_cfg_path)
+                        # elif shape in ["arbitrary"]: #, "smooth_arbitrary"]:
+                            # vals[tt, gsl, intensity] = parsl_run_opt(new_cfg_path)
                         else:
                             raise NotImplementedError(f"Shape {shape} not implemented for adept.")
 
                     elif solver == "matlab":
                         try:
-                            vals[tt, gsl, intensity] = run_matlab(new_cfg_path, shape=shape)
+                            vals[tt, gsl, intensity] = run_matlab(new_cfg_path, shape=shape, bandwidth_run_id=bandwidth_run_id)
                         except Exception as exc:
                             logger.exception(
                                 "MATLAB run failed for %s (T=%s, GSL=%s, I=%s): %s",
@@ -180,7 +191,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the TPD scan")
     parser.add_argument("--config", type=str, help="The config file")
     parser.add_argument(
-        "--shape", type=str, default="uniform", help="The laser shape: uniform, random_phaser, mono, arbitrary"
+        "--shape", type=str, default="uniform", help="The laser shape: uniform, random_phaser, mono, arbitrary, opt"
     )
     parser.add_argument("--solver", type=str, default="adept", help="The solver to use: adept or matlab")
     parser.add_argument("--provider", type=str, default="gpu", help="The Parsl provider to use")
@@ -188,6 +199,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--init", type=str, default="uniform", help="The initialization for arbitrary shape: random or uniform"
     )
+    parser.add_argument("--bandwidth_run_id", type=str, default=None, help="The bandwidth run ID")
 
     args = parser.parse_args()
     cfg_path = args.config
@@ -195,8 +207,9 @@ if __name__ == "__main__":
     solver = args.solver
     parsl_provider = args.provider
     num_nodes = args.nodes
+    bandwidth_run_id = args.bandwidth_run_id
 
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     scan_loop(
-        cfg_path, shape=shape, solver=solver, parsl_provider=parsl_provider, num_nodes=num_nodes, amp_init=args.init
+        cfg_path, shape=shape, solver=solver, parsl_provider=parsl_provider, num_nodes=num_nodes, amp_init=args.init, bandwidth_run_id=bandwidth_run_id
     )

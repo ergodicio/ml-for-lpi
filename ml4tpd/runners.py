@@ -32,6 +32,9 @@ def clear_xla_cache():
 
 
 def _execute_adept_forward(cfg, parent_run_id):
+    import jax
+    # jax.config.update("jax_enable_x64", True)
+    
     from adept import ergoExo
     from ml4tpd import TPDModule
 
@@ -57,8 +60,10 @@ def run_adept_fwd(_cfg_path, parent_run_id=None, seed=None, run_name=None):
     Returns:
         The loss value from the forward evaluation.
     """
+    
     import yaml, mlflow
     from adept import utils as adept_utils
+
 
     with open(_cfg_path, "r") as fi:
         cfg = yaml.safe_load(fi)
@@ -98,13 +103,7 @@ def run_adept_fwd_ensemble(_cfg_path, num_seeds=8):
         for i in range(num_seeds):
             seed = int(np.random.randint(0, 2**10))
             run_name = f"seed-{i}"
-            val = run_adept_fwd(
-                _cfg_path=_cfg_path,
-                parent_run_id=parent_run.info.run_id,
-                seed=seed,
-                run_name=run_name,
-                log_params=False,
-            )
+            val = run_adept_fwd(_cfg_path=_cfg_path, parent_run_id=parent_run.info.run_id, seed=seed, run_name=run_name)
             vals.append(val)
         mean_val = float(np.mean(vals))
         mlflow.log_metric("loss", mean_val)
@@ -116,6 +115,9 @@ def run_one_val_and_grad(parent_run_id, _run_cfg_path, export=False):
     from equinox import partition
 
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+    import jax
+    # jax.config.update("jax_enable_x64", True)
 
     from adept import ergoExo
     from ml4tpd import TPDModule
