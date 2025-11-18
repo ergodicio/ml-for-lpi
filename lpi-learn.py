@@ -34,6 +34,8 @@ def train_model(_cfg_path, parsl_provider="gpu", num_nodes=4):
     with open(f"{_cfg_path}", "r") as fi:
         orig_cfg = yaml.safe_load(fi)
 
+    orig_cfg["parsl"]["provider"] = parsl_provider 
+    orig_cfg["parsl"]["nodes"] = num_nodes
     mlflow.set_experiment(orig_cfg["mlflow"]["experiment"])
     exo = ergoExo()
     modules = exo.setup(orig_cfg, adept_module=TPDModule)

@@ -23,15 +23,15 @@ else:
 
 
 def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", num_nodes=4, amp_init="uniform", bandwidth_run_id=None):
-    temperatures = np.round(np.linspace(2000, 4000, 3), 0)[-1:]
-    gradient_scale_lengths = np.round(np.linspace(200, 600, 5), 0)[-1:]
+    temperatures = np.round(np.linspace(2000, 4000, 3), 0)[:1]
+    gradient_scale_lengths = np.round(np.linspace(200, 600, 5), 0)[:1]
 
     # intensities = np.round(np.linspace(1.0e14, 1.0e15, 16), 3)
     # intensities = np.array([4.0e14, 6.0e14, 8.0e14])
     # intensity_factors = np.linspace(0.5, 1.5, 11)
     # intensity_factors = np.linspace(0.2, 0.6, 2)[::-1]
     # intensity_factors = np.linspace(1.0, 1.6, 7)
-    intensity_factors = np.linspace(0.5, 2.5, 3)
+    intensity_factors = np.linspace(0.5, 1.5, 4)
     
 
     all_hps = list(product(temperatures, gradient_scale_lengths, intensity_factors))
@@ -46,7 +46,8 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
     parsl_run_opt = python_app(run_opt_with_retry)
     # parsl_run_matlab = python_app(run_matlab)
 
-    orig_cfg["mlflow"]["experiment"] = "srs-25ps-matlab-baseline" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
+    orig_cfg["mlflow"]["experiment"] = "Default"
+    # orig_cfg["mlflow"]["experiment"] = "srs-25ps-matlab-baseline" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
     # orig_cfg["mlflow"]["experiment"] = "srs-25ps-adept" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
 
     opt = orig_cfg["opt"]["method"]
@@ -54,7 +55,7 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
     #     orig_cfg["mlflow"]["experiment"] = f"{solver}-{shape}-tpd-100ps-{opt}"
 
     # delete failed and running runs
-    all_hps, all_runs = get_remaining_runs(orig_cfg, all_hps)
+    # all_hps, all_runs = get_remaining_runs(orig_cfg, all_hps)
 
     with parsl.load(parsl_config):
         with tempfile.TemporaryDirectory(dir=BASE_TEMPDIR) as _td:
