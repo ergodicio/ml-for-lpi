@@ -136,7 +136,7 @@ class TrainingLoop:
         self.training_tmax_ps = 25.0
         self.training_save_dt_ps = 5.0
         self.validation_tmax_ps = 100.0
-        self.validation_save_dt_ps = 0.5
+        self.validation_save_dt_ps = 5.0
 
         self.rng = np.random.default_rng()
         self.hp_to_base_intensity = {(hp[0], hp[1]): hp[2] for hp in all_hps}
@@ -145,52 +145,100 @@ class TrainingLoop:
         self.unique_gradient_scale_lengths = sorted({hp[1] for hp in all_hps})
 
         validation_cfg = orig_cfg.get("validation", {})
-        temp_subset = validation_cfg.get("temperatures_per_epoch")
-        gsl_subset = validation_cfg.get("gradient_scale_lengths_per_epoch")
-        if temp_subset is None:
-            temp_subset = len(self.unique_temperatures)
-        if gsl_subset is None:
-            gsl_subset = len(self.unique_gradient_scale_lengths)
-        self.validation_temperatures_per_epoch = max(1, int(temp_subset)) if self.unique_temperatures else 0
-        self.validation_gsls_per_epoch = max(1, int(gsl_subset)) if self.unique_gradient_scale_lengths else 0
+
+        # Support both direct pairs and separate temperature/GSL lists (backwards compatible)
+        validation_pairs_cfg = validation_cfg.get("pairs")
+        if validation_pairs_cfg is not None:
+            # New format: direct (Te, GSL) pairs
+            self.validation_pairs_population = []
+            for pair in validation_pairs_cfg:
+                if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                    tt, gsl = float(pair[0]), float(pair[1])
+                    if (tt, gsl) in self.hp_to_base_intensity:
+                        self.validation_pairs_population.append((tt, gsl))
+                    else:
+                        logger.warning(f"Validation pair ({tt}, {gsl}) not in training set, skipping")
+
+            if not self.validation_pairs_population:
+                logger.warning("No valid validation pairs specified, using all training pairs")
+                self.validation_pairs_population = [(hp[0], hp[1]) for hp in all_hps]
+
+            default_pairs_per_epoch = len(self.validation_pairs_population)
+            self.validation_pairs_per_epoch = max(
+                1, int(validation_cfg.get("pairs_per_epoch", default_pairs_per_epoch))
+            )
+            self.use_direct_pairs = True
+        else:
+            # Old format: product of temperatures and GSLs
+            self.validation_temperature_population = self._build_validation_population(
+                available=self.unique_temperatures,
+                requested=validation_cfg.get("temperatures"),
+                label="temperatures",
+            )
+            self.validation_gsl_population = self._build_validation_population(
+                available=self.unique_gradient_scale_lengths,
+                requested=validation_cfg.get("gradient_scale_lengths"),
+                label="gradient scale lengths",
+            )
+
+            default_temp_subset = len(self.validation_temperature_population)
+            default_gsl_subset = len(self.validation_gsl_population)
+            temp_subset = validation_cfg.get("temperatures_per_epoch", default_temp_subset)
+            gsl_subset = validation_cfg.get("gradient_scale_lengths_per_epoch", default_gsl_subset)
+            self.validation_temperatures_per_epoch = (
+                max(1, int(temp_subset)) if self.validation_temperature_population else 0
+            )
+            self.validation_gsls_per_epoch = max(1, int(gsl_subset)) if self.validation_gsl_population else 0
+            self.use_direct_pairs = False
+
         intensity_scan_cfg = validation_cfg.get("intensity_scan", {})
-        self.validation_intensity_samples = max(1, int(intensity_scan_cfg.get("num_samples", 1)))
+        self.validation_intensity_default_samples = max(1, int(intensity_scan_cfg.get("num_samples", 1)))
+        intensity_budget = intensity_scan_cfg.get("max_total_samples")
+        self.validation_intensity_total_budget = max(1, int(intensity_budget)) if intensity_budget else None
 
+        # Dynamic intensity factor scheduling - per (Te, GSL) pair
         intensity_schedule_cfg = orig_cfg.get("intensity_schedule", {})
-        self.factor_cap_min = float(intensity_schedule_cfg.get("cap_min", 1.1))
-        self.factor_cap_max = float(intensity_schedule_cfg.get("cap_max", 2.0))
-        initial_cap = float(intensity_schedule_cfg.get("initial_cap", 1.5))
-        self.factor_cap = float(np.clip(initial_cap, self.factor_cap_min, self.factor_cap_max))
-        self.factor_cap_growth = float(intensity_schedule_cfg.get("growth_rate", 1.05))
-        self.factor_cap_decay = float(intensity_schedule_cfg.get("decay_rate", 0.9))
-        self.floor_step = float(intensity_schedule_cfg.get("floor_step", 0.02))
-        self.floor_margin = float(intensity_schedule_cfg.get("floor_margin", 0.05))
-        self.bracket_tolerance = float(intensity_schedule_cfg.get("bracket_tolerance", 0.02))
+        self.factor_min_initial = float(intensity_schedule_cfg.get("min_initial", 0.5))
+        self.factor_min_target = float(intensity_schedule_cfg.get("min_target", 1.8))
+        self.factor_max_initial = float(intensity_schedule_cfg.get("max_initial", 1.2))
+        self.factor_max_target = float(intensity_schedule_cfg.get("max_target", 3.5))
 
-        self.grad_clip_norm = float(orig_cfg.get("opt", {}).get("grad_clip_norm", 10000.0))
-        self.hp_states = {
-            (hp[0], hp[1]): {"safe": self.factor_cap_min, "unsafe": self.factor_cap_max} for hp in all_hps
+        # Per-(Te, GSL) intensity factor ranges
+        self.hp_factor_ranges = {
+            (hp[0], hp[1]): {
+                "min": self.factor_min_initial,
+                "max": self.factor_max_initial,
+            }
+            for hp in all_hps
         }
-        self.factor_floor = self.factor_cap_min
+
+        # Thresholds for adaptation
+        self.loss_target_low = float(intensity_schedule_cfg.get("loss_target_low", 0.0))
+        self.loss_target_high = float(intensity_schedule_cfg.get("loss_target_high", 20.0))
+        self.nan_threshold = float(intensity_schedule_cfg.get("nan_threshold", 0.2))
+        self.growth_rate = float(intensity_schedule_cfg.get("growth_rate", 1.08))
+        self.shrink_rate = float(intensity_schedule_cfg.get("shrink_rate", 0.95))
+        self.grad_clip_norm = float(orig_cfg.get("opt", {}).get("grad_clip_norm", 10000.0))
 
     def run(self, workdir: str) -> float:
         """Execute the full training curriculum and return the final epoch loss."""
         epoch_loss_mean = 0.0
         for epoch in range(self.start_epoch, self.max_epochs):
-            epoch_result = self._run_epoch(epoch, workdir)
-            self._update_factor_cap(epoch_result)
+            epoch_result, sample_results = self._run_epoch(epoch, workdir)
             val_loss = self._maybe_run_validation(epoch, workdir)
+            self._update_intensity_schedule(epoch, sample_results)
             self._log_epoch_metrics(epoch, epoch_result, val_loss)
             epoch_loss_mean = epoch_result.loss_mean
         return epoch_loss_mean
 
-    def _run_epoch(self, epoch: int, workdir: str) -> EpochResult:
+    def _run_epoch(self, epoch: int, workdir: str):
         """Run one epoch of batched jobs and aggregate losses, gradients, and stability data."""
         epoch_losses = []
         epoch_gradnorms = []
         epoch_total_samples = 0
         epoch_positive_samples = 0
         epoch_nan_samples = 0
+        sample_results = []  # List of (hp_key, factor, loss, is_nan)
 
         self.rng.shuffle(self.all_hps)
 
@@ -201,7 +249,7 @@ class TrainingLoop:
                 continue
 
             module_path = self._save_batch_state(epoch, batch_idx, workdir)
-            batch_result = self._run_batch(
+            batch_result, batch_sample_results = self._run_batch(
                 epoch=epoch,
                 batch_idx=batch_idx,
                 training_data=training_data,
@@ -212,16 +260,18 @@ class TrainingLoop:
             epoch_total_samples += batch_result.total_samples
             epoch_positive_samples += batch_result.positive_samples
             epoch_nan_samples += batch_result.nan_samples
+            sample_results.extend(batch_sample_results)
 
         loss_mean = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         grad_norm_mean = float(np.mean(epoch_gradnorms)) if epoch_gradnorms else 0.0
-        return EpochResult(
+        epoch_result = EpochResult(
             loss_mean=loss_mean,
             grad_norm_mean=grad_norm_mean,
             total_samples=epoch_total_samples,
             positive_samples=epoch_positive_samples,
             nan_samples=epoch_nan_samples,
         )
+        return epoch_result, sample_results
 
     def _save_batch_state(self, epoch: int, batch_idx: int, workdir: str) -> str:
         """Persist optimizer state and weights for reproducibility and later export."""
@@ -237,20 +287,25 @@ class TrainingLoop:
         mlflow.log_artifact(module_path)
         return module_path
 
-    def _run_batch(self, *, epoch: int, batch_idx: int, training_data, module_path: str) -> BatchResult:
+    def _run_batch(self, *, epoch: int, batch_idx: int, training_data, module_path: str):
         """Launch Parsl tasks for one batch, accumulate gradients, and apply an optimizer step."""
         self.orig_cfg["drivers"]["E0"]["file"] = module_path
 
         val_and_grads = []
+        sample_metadata = []  # Track (hp_key, factor) for each sample
         for sample_idx, training_example in enumerate(training_data):
             print(f"{epoch=}, {batch_idx=}, {sample_idx=} -- _Training Data: {training_example}")
-            run_cfg_path, export = self._write_training_sample_config(
+            run_cfg_path, export, factor = self._write_training_sample_config(
                 epoch=epoch,
                 batch_idx=batch_idx,
                 sample_idx=sample_idx,
                 training_example=training_example,
                 module_path=module_path,
             )
+            tt, gsl, _ = training_example
+            hp_key = (tt, gsl)
+            sample_metadata.append((hp_key, factor))
+
             val_and_grads.append(
                 self.parsl_run_one_val_and_grad(
                     parent_run_id=self.parent_run_id, _run_cfg_path=run_cfg_path, export=export
@@ -268,6 +323,12 @@ class TrainingLoop:
         positive_samples = int(np.sum(finite_mask & (raw_validation_losses > 0.0)))
         overflow_mask = finite_mask & (np.abs(raw_validation_losses) >= self.MAX_USEFUL_LOSS)
         overflow_samples = int(np.sum(overflow_mask))
+
+        # Build sample results for scheduling updates
+        sample_results = []
+        for (hp_key, factor), raw_loss in zip(sample_metadata, raw_validation_losses):
+            is_nan = not np.isfinite(raw_loss)
+            sample_results.append((hp_key, factor, raw_loss, is_nan))
 
         valid_grad_entries = [
             grad
@@ -305,13 +366,14 @@ class TrainingLoop:
         self.diff_params = eqx.apply_updates(self.diff_params, updates)
         self.modules["laser"] = eqx.combine(self.diff_params, self.static_params)
 
-        return BatchResult(
+        batch_result = BatchResult(
             mean_loss=mean_loss,
             grad_norm=float(np.linalg.norm(flat_grad)),
             total_samples=len(training_data),
             positive_samples=positive_samples,
             nan_samples=nan_samples + overflow_samples,
         )
+        return batch_result, sample_results
 
     def _write_training_sample_config(
         self,
@@ -321,13 +383,14 @@ class TrainingLoop:
         sample_idx: int,
         training_example,
         module_path: str,
-    ) -> Tuple[str, bool]:
-        """Write a single training run configuration and return its path plus export flag."""
+    ) -> Tuple[str, bool, float]:
+        """Write a single training run configuration and return its path, export flag, and factor."""
         tt, gsl, base_intensity = training_example
+        hp_key = (tt, gsl)
         export = bool(self.rng.choice([True, False], p=[0.25, 0.75]))
 
         self._apply_training_temporal_settings()
-        factor = self._sample_training_factor()
+        factor = self._sample_training_factor(hp_key)
         intensity = factor * base_intensity
 
         self.orig_cfg["units"]["reference electron temperature"] = f"{tt:.3f} eV"
@@ -349,37 +412,74 @@ class TrainingLoop:
         with open(run_cfg_path, "w") as fi:
             yaml.dump(self.orig_cfg, fi)
 
-        return run_cfg_path, export
+        return run_cfg_path, export, factor
 
-    def _sample_training_factor(self) -> float:
-        """Draw a training intensity factor within the current floor/cap band."""
-        upper = self.factor_cap
-        lower_target = min(self.factor_floor, upper - self.floor_margin)
-        lower = max(self.factor_cap_min, lower_target)
-        if lower >= upper:
-            lower = max(self.factor_cap_min, upper - 1e-3)
-        return float(self.rng.uniform(lower, upper))
+    def _sample_training_factor(self, hp_key) -> float:
+        """Draw a training intensity factor from the per-HP dynamic range."""
+        hp_range = self.hp_factor_ranges[hp_key]
+        return float(self.rng.uniform(hp_range["min"], hp_range["max"]))
 
-    def _update_factor_cap(self, epoch_result: EpochResult) -> None:
-        """Adjust the intensity cap/floor based on NaN frequency."""
-        nan_fraction = epoch_result.nan_fraction
-        if nan_fraction == 0.0:
-            self.factor_cap = min(self.factor_cap * self.factor_cap_growth, self.factor_cap_max)
-        elif nan_fraction > 0.2:
-            self.factor_cap = max(self.factor_cap * self.factor_cap_decay, self.factor_cap_min)
-        self.factor_cap = float(np.clip(self.factor_cap, self.factor_cap_min, self.factor_cap_max))
+    def _update_intensity_schedule(self, epoch: int, sample_results: list) -> None:
+        """Update per-HP intensity factor ranges based on sample-level results."""
+        # Group results by HP key
+        hp_results = {}
+        for hp_key, factor, loss, is_nan in sample_results:
+            if hp_key not in hp_results:
+                hp_results[hp_key] = []
+            hp_results[hp_key].append((factor, loss, is_nan))
 
-        max_allowed_floor = max(self.factor_cap_min, self.factor_cap - self.floor_margin)
-        if nan_fraction == 0.0:
-            self.factor_floor = min(max_allowed_floor, self.factor_floor + self.floor_step)
-        elif nan_fraction > 0.2:
-            self.factor_floor = max(self.factor_cap_min, min(max_allowed_floor, self.factor_floor - self.floor_step))
-        else:
-            self.factor_floor = min(self.factor_floor, max_allowed_floor)
+        # Update each HP's range independently
+        for hp_key, results in hp_results.items():
+            if hp_key not in self.hp_factor_ranges:
+                continue
+
+            hp_range = self.hp_factor_ranges[hp_key]
+
+            # Calculate statistics for this HP
+            losses = [loss for _, loss, is_nan in results if not is_nan]
+            nan_count = sum(1 for _, _, is_nan in results if is_nan)
+            nan_fraction = nan_count / len(results) if results else 0.0
+
+            # Decide whether to grow or shrink this HP's range
+            should_grow = False
+            should_shrink = False
+
+            if losses:
+                mean_loss = np.mean(losses)
+                # losses are small and indicate small gradients
+                if mean_loss < self.loss_target_low:
+                    should_grow = True
+                # Model is struggling with high losses or instability
+                if nan_fraction > self.nan_threshold * 1.5 or mean_loss > self.loss_target_high:
+                    should_shrink = True
+            elif nan_fraction > self.nan_threshold:
+                # Only NaNs, definitely shrink
+                should_shrink = True
+
+            # Update this HP's bounds
+            if should_grow:
+                # Expand the range: increase max, increase min (push range upward)
+                hp_range["max"] = min(hp_range["max"] * self.growth_rate, self.factor_max_target)
+                hp_range["min"] = min(
+                    hp_range["min"] * self.growth_rate,
+                    self.factor_min_target,
+                    hp_range["max"] - 0.1,  # ensure min stays below max
+                )
+            elif should_shrink:
+                # Reduce the upper and lower bound when model struggles
+                hp_range["max"] = max(hp_range["max"] * self.shrink_rate, self.factor_max_initial)
+                hp_range["min"] = max(hp_range["min"] * self.shrink_rate, self.factor_min_initial)
+
+            # Ensure bounds remain valid
+            hp_range["min"] = float(np.clip(hp_range["min"], self.factor_min_initial, self.factor_min_target))
+            hp_range["max"] = float(np.clip(hp_range["max"], self.factor_max_initial, self.factor_max_target))
+            # Ensure min < max with a small margin
+            if hp_range["min"] >= hp_range["max"]:
+                hp_range["min"] = max(self.factor_min_initial, hp_range["max"] - 0.1)
 
     def _maybe_run_validation(self, epoch: int, workdir: str):
-        """Optionally run validation and refine brackets according to the schedule."""
-        if epoch % self.validation_interval != 0 or not self.hp_states:
+        """Run validation at specified intervals with static intensity factors."""
+        if epoch % self.validation_interval != 0:
             return None
 
         latest_weights_path = os.path.join(workdir, "weights-history", f"weights-e{epoch:02d}-latest.eqx")
@@ -387,6 +487,7 @@ class TrainingLoop:
 
         validation_tasks = []
         selected_hp_keys = self._select_validation_hp_pairs()
+
         for hp_key in selected_hp_keys:
             tt, gsl = hp_key
             base_intensity = self.hp_to_base_intensity.get(hp_key)
@@ -407,19 +508,12 @@ class TrainingLoop:
                     workdir=workdir,
                 )
 
-                validation_tasks.append(
-                    (
-                        self.parsl_run_fwd(validation_cfg_path, parent_run_id=self.parent_run_id),
-                        hp_key,
-                        factor,
-                    )
-                )
+                validation_tasks.append(self.parsl_run_fwd(validation_cfg_path, parent_run_id=self.parent_run_id))
 
         validation_losses = []
-        for future, hp_key, factor in validation_tasks:
+        for future in validation_tasks:
             raw_loss = future.result()
             validation_losses.append(raw_loss)
-            self._update_bracket(hp_key, factor, raw_loss)
 
         if not validation_losses:
             return None
@@ -431,19 +525,23 @@ class TrainingLoop:
 
     def _select_validation_hp_pairs(self):
         """Choose a reduced set of (Te, GSL) pairs to probe during validation."""
-        if not self.hp_states:
-            return []
-        selected_temps = self._sample_population(self.unique_temperatures, self.validation_temperatures_per_epoch)
-        selected_gsls = self._sample_population(
-            self.unique_gradient_scale_lengths, self.validation_gsls_per_epoch
-        )
-        hp_pairs = [(tt, gsl) for tt in selected_temps for gsl in selected_gsls if (tt, gsl) in self.hp_states]
-        if hp_pairs:
-            return hp_pairs
-        all_keys = list(self.hp_states.keys())
-        desired = max(1, self.validation_temperatures_per_epoch * self.validation_gsls_per_epoch)
-        desired = min(desired, len(all_keys))
-        return self._sample_population(all_keys, desired)
+        if self.use_direct_pairs:
+            # New format: directly specified pairs
+            return self._sample_population(self.validation_pairs_population, self.validation_pairs_per_epoch)
+        else:
+            # Old format: product of temperatures and GSLs
+            selected_temps = self._sample_population(
+                self.validation_temperature_population, self.validation_temperatures_per_epoch
+            )
+            selected_gsls = self._sample_population(self.validation_gsl_population, self.validation_gsls_per_epoch)
+            hp_pairs = [(tt, gsl) for tt in selected_temps for gsl in selected_gsls]
+            if hp_pairs:
+                return hp_pairs
+            # Fallback: sample from all available pairs
+            all_keys = [(hp[0], hp[1]) for hp in self.all_hps]
+            desired = max(1, self.validation_temperatures_per_epoch * self.validation_gsls_per_epoch)
+            desired = min(desired, len(all_keys))
+            return self._sample_population(all_keys, desired)
 
     def _sample_population(self, population, sample_size: int):
         """Sample without replacement from a population of floats/tuples."""
@@ -455,24 +553,56 @@ class TrainingLoop:
         indices = self.rng.choice(len(items), size=sample_size, replace=False)
         return [items[i] for i in indices]
 
-    def _build_validation_factors(self, hp_key) -> List[float]:
-        """Return the intensity factors to evaluate for one (Te, GSL) pair."""
-        state = self.hp_states[hp_key]
-        if self.validation_intensity_samples == 1:
-            bracket_width = state["unsafe"] - state["safe"]
-            factor = (
-                state["safe"] if bracket_width <= self.bracket_tolerance else 0.5 * (state["safe"] + state["unsafe"])
-            )
-            return [float(np.clip(factor, self.factor_cap_min, self.factor_cap_max))]
+    def _build_validation_population(self, *, available, requested, label: str):
+        """Return the ordered list of values to consider for validation."""
+        population = list(available)
+        if not population:
+            return []
+        if requested is None:
+            return population
 
-        lower = min(state["safe"], state["unsafe"])
-        upper = max(state["safe"], state["unsafe"])
-        lower = max(self.factor_cap_min, lower)
-        upper = min(self.factor_cap_max, upper)
-        if np.isclose(lower, upper):
-            return [float(lower)] * self.validation_intensity_samples
-        factors = np.linspace(lower, upper, self.validation_intensity_samples)
-        return [float(np.clip(f, self.factor_cap_min, self.factor_cap_max)) for f in factors]
+        cleaned = []
+        seen = set()
+        for raw in requested:
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                logger.warning("Ignoring non-numeric validation %s value: %r", label, raw)
+                continue
+            if value not in seen:
+                cleaned.append(value)
+                seen.add(value)
+
+        if not cleaned:
+            logger.warning("No valid entries found for validation %s; using full available range.", label)
+            return population
+
+        available_map = {float(val): val for val in population}
+        filtered = []
+        missing = []
+        for value in cleaned:
+            if value in available_map:
+                filtered.append(available_map[value])
+            else:
+                missing.append(value)
+
+        if missing:
+            missing_str = ", ".join(f"{val:g}" for val in missing)
+            logger.warning("Skipping validation %s outside the training set: %s", label, missing_str)
+
+        if not filtered:
+            logger.warning("Requested validation %s were unavailable; falling back to all options.", label)
+            return population
+        return filtered
+
+    def _build_validation_factors(self, hp_key) -> List[float]:
+        """Return validation intensity factors from the per-HP dynamic range."""
+        hp_range = self.hp_factor_ranges.get(hp_key)
+        if hp_range is None:
+            # Fallback to initial values if HP not found
+            hp_range = {"min": self.factor_min_initial, "max": self.factor_max_initial}
+        factors = np.linspace(hp_range["min"], hp_range["max"], self.validation_intensity_default_samples)
+        return [float(f) for f in factors]
 
     def _write_validation_config(
         self,
@@ -515,16 +645,6 @@ class TrainingLoop:
 
         return validation_cfg_path
 
-    def _update_bracket(self, hp_key, factor: float, raw_loss: float) -> None:
-        """Update the safe/unsafe bounds for one (Te, GSL) pair."""
-        state = self.hp_states[hp_key]
-        is_stable = np.isfinite(raw_loss) and raw_loss <= 0.0
-        if is_stable:
-            state["safe"] = max(state["safe"], factor)
-        else:
-            state["unsafe"] = min(state["unsafe"], max(factor, state["safe"] + 1e-3))
-            state["unsafe"] = max(state["unsafe"], state["safe"] + 1e-3)
-
     @staticmethod
     def _tree_all_finite(tree) -> bool:
         leaves, _ = jax.tree_util.tree_flatten(tree)
@@ -546,21 +666,26 @@ class TrainingLoop:
 
     def _log_epoch_metrics(self, epoch: int, epoch_result: EpochResult, val_loss: float) -> None:
         """Log epoch aggregates and optional validation loss to MLflow."""
-        safe_values = [state["safe"] for state in self.hp_states.values()] if self.hp_states else []
-        safe_mean = float(np.mean(safe_values)) if safe_values else 0.0
-        safe_min = float(np.min(safe_values)) if safe_values else 0.0
         nan_fraction = epoch_result.nan_fraction
         positive_fraction = epoch_result.positive_fraction
+
+        # Calculate aggregate statistics across all HP ranges
+        all_mins = [hp_range["min"] for hp_range in self.hp_factor_ranges.values()]
+        all_maxs = [hp_range["max"] for hp_range in self.hp_factor_ranges.values()]
+        all_widths = [hp_range["max"] - hp_range["min"] for hp_range in self.hp_factor_ranges.values()]
 
         metrics = {
             "epoch loss": epoch_result.loss_mean,
             "epoch grad norm": epoch_result.grad_norm_mean,
             "epoch nan fraction": nan_fraction,
             "epoch positive fraction": positive_fraction,
-            "factor cap": self.factor_cap,
-            "factor floor": self.factor_floor,
-            "safe factor mean": safe_mean,
-            "safe factor min": safe_min,
+            "factor_min_mean": float(np.mean(all_mins)),
+            "factor_min_min": float(np.min(all_mins)),
+            "factor_min_max": float(np.max(all_mins)),
+            "factor_max_mean": float(np.mean(all_maxs)),
+            "factor_max_min": float(np.min(all_maxs)),
+            "factor_max_max": float(np.max(all_maxs)),
+            "factor_range_width_mean": float(np.mean(all_widths)),
         }
         if val_loss is not None:
             metrics["val loss"] = val_loss

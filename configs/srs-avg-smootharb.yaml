@@ -43,8 +43,8 @@ grid:
   low_pass_filter: 0.66
   tmax: 25ps
   tmin: 0.0ns
-  ymax: 6um
-  ymin: -6um
+  ymax: 0.25um
+  ymin: -0.25um
 
 training data:
   num_temperatures: 4
@@ -65,7 +65,7 @@ parsl:
   walltime: 12:00:00
 
 mlflow:
-  experiment: learn-tpd-25ps
+  experiment: learn-srs-25ps
   run: Te-Ln-avg-smootharb
 
 save:
@@ -94,8 +94,8 @@ terms:
     linear: true
     source: 
       noise: true
-      tpd: true
-      srs: false
+      tpd: false
+      srs: true
   zero_mask: true
 units:
   atomic number: 40

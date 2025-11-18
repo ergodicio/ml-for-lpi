@@ -2,6 +2,7 @@ import os
 import subprocess
 import tempfile
 
+import mat73
 import mlflow
 import numpy as np
 import scienceplots  # noqa: F401  # Needed for the registered matplotlib style
@@ -65,22 +66,29 @@ def _prepare_seed_params(cfg, seed_index, bandwidth_run_id=None):
 
 def _execute_seed_run(seed_params, shape, base_tempdir):
     with tempfile.TemporaryDirectory(dir=base_tempdir) as td:
-        data = _run_matlab_simulation(seed_params, shape, td)
+        _run_matlab_simulation(seed_params, shape, td)
 
-        epw_energy, max_phi, time_axis = _extract_time_series(data)
-        metrics = _build_metrics(epw_energy, max_phi)
+        try:
+            import mat73
 
-        _plot_epw_energy(epw_energy, time_axis, td)
-        _plot_max_phi(max_phi, time_axis, td)
+            data = mat73.loadmat(os.path.join(td, "output.mat"))["output"]  # , simplify_cells=True)["output"]
 
-        axes = _build_axes(data)
-        _save_laser_artifacts(data, axes, td)
-        _save_epw_artifacts(data, axes, td)
-        _save_density_artifacts(data, axes, td)
+            epw_energy, max_phi, time_axis = _extract_time_series(data)
+            metrics = _build_metrics(epw_energy, max_phi)
+
+            _plot_epw_energy(epw_energy, time_axis, td)
+            _plot_max_phi(max_phi, time_axis, td)
+
+            axes = _build_axes(data)
+            _save_laser_artifacts(data, axes, td)
+            _save_epw_artifacts(data, axes, td)
+            _save_density_artifacts(data, axes, td)
+        except Exception as e:
+            print("post-processing failed:", e)
 
         mlflow.log_artifacts(td)
 
-    return metrics
+    return {}
 
 
 def _run_matlab_simulation(seed_params, shape, output_dir):
@@ -90,7 +98,9 @@ def _run_matlab_simulation(seed_params, shape, output_dir):
             os.path.abspath("/global/homes/a/archis/lpse-matlab/"), f"{seed_params['bandwidth_run_id']}.csv"
         )
         mlflow.artifacts.download_artifacts(
-            run_id=seed_params["bandwidth_run_id"], artifact_path="driver/used_driver.csv", dst_path=os.path.abspath("/global/homes/a/archis/lpse-matlab/")
+            run_id=seed_params["bandwidth_run_id"],
+            artifact_path="driver/used_driver.csv",
+            dst_path=os.path.abspath("/global/homes/a/archis/lpse-matlab/"),
         )
         # move file from "/global/homes/a/archis/lpse-matlab/used_driver.csv") to run_id.csv
         os.rename(
@@ -113,7 +123,6 @@ def _run_matlab_simulation(seed_params, shape, output_dir):
         + ")",
     ]
     subprocess.run(matlab_cmd)
-    return loadmat(os.path.join(output_dir, "output.mat"), simplify_cells=True)["output"]
 
 
 def _extract_time_series(data):
@@ -160,17 +169,25 @@ def _plot_time_history(time_axis, values, ylabel, label, output_path):
     _save_fig(fig, output_path)
 
 
+def _is_1d_simulation(data):
+    """Determine if simulation is 1D or 2D based on y-coordinate size."""
+    y_coords = np.squeeze(data["y"])
+    return y_coords.size == 1
+
+
 def _build_axes(data):
     x_coords = np.squeeze(data["x"])
     y_coords = np.squeeze(data["y"])
     time_coords = np.squeeze(data["outputTimes"])
     t_skip = max(int(time_coords.size // 8), 1)
     tslice = slice(0, -1, t_skip)
+    is_1d = _is_1d_simulation(data)
     return {
         "x": x_coords,
         "y": y_coords,
         "time": time_coords,
         "tslice": tslice,
+        "is_1d": is_1d,
     }
 
 
@@ -178,27 +195,46 @@ def _save_laser_artifacts(data, axes, output_dir):
     laser_dir = os.path.join(output_dir, "laser")
     os.makedirs(laser_dir, exist_ok=True)
 
-    E0x = np.array([data["E0_save"][i]["x"] for i in range(len(data["E0_save"]))])
-    E0y = np.array([data["E0_save"][i]["y"] for i in range(len(data["E0_save"]))])
+    if axes["is_1d"]:
+        # 1D case: data has shape (time, x)
+        E0y = np.array([np.squeeze(_arr[0]["y"]) for _arr in data["E0_save"]])
 
-    laser_ds = xr.Dataset(
-        {
-            "E0x": (("time", "x", "y"), E0x),
-            "E0y": (("time", "x", "y"), E0y),
-        },
-        coords={
-            "x": ("x", axes["x"], {"units": "um"}),
-            "y": ("y", axes["y"], {"units": "um"}),
-            "time": ("time", axes["time"], {"units": "ps"}),
-        },
-    )
+        laser_ds = xr.Dataset(
+            {
+                "E0y": (("time", "x"), E0y),
+            },
+            coords={
+                "x": ("x", axes["x"], {"units": "um"}),
+                "time": ("time", axes["time"], {"units": "ps"}),
+            },
+        )
 
-    _save_xarray_panel(np.abs(laser_ds["E0x"][axes["tslice"]].T), os.path.join(laser_dir, "E0x.png"))
-    _save_xarray_panel(np.abs(laser_ds["E0y"][axes["tslice"]].T), os.path.join(laser_dir, "E0y.png"))
-    _save_xarray_panel(
-        np.abs(laser_ds["E0y"][axes["tslice"]].isel(y=E0y.shape[2] // 2)),
-        os.path.join(laser_dir, "E0y_lineout.png"),
-    )
+        # _save_xarray_line_panel(np.abs(laser_ds["E0x"][axes["tslice"]]), os.path.join(laser_dir, "E0x.png"))
+        _save_xarray_line_panel(np.abs(laser_ds["E0y"][axes["tslice"]]), os.path.join(laser_dir, "E0y.png"))
+    else:
+        # 2D case: data has shape (time, x, y)
+        E0x = np.array([_arr[0]["x"][:, 0] for _arr in data["E0_save"]])
+        E0y = np.array([_arr[0]["y"][:, 0] for _arr in data["E0_save"]])
+
+        laser_ds = xr.Dataset(
+            {
+                "E0x": (("time", "x", "y"), E0x),
+                "E0y": (("time", "x", "y"), E0y),
+            },
+            coords={
+                "x": ("x", axes["x"], {"units": "um"}),
+                "y": ("y", axes["y"], {"units": "um"}),
+                "time": ("time", axes["time"], {"units": "ps"}),
+            },
+        )
+
+        _save_xarray_panel(np.abs(laser_ds["E0x"][axes["tslice"]].T), os.path.join(laser_dir, "E0x.png"))
+        _save_xarray_panel(np.abs(laser_ds["E0y"][axes["tslice"]].T), os.path.join(laser_dir, "E0y.png"))
+        _save_xarray_panel(
+            np.abs(laser_ds["E0y"][axes["tslice"]].isel(y=E0y.shape[2] // 2)),
+            os.path.join(laser_dir, "E0y_lineout.png"),
+        )
+
     laser_ds.to_netcdf(os.path.join(laser_dir, "laser_fields.nc"))
 
     # some simulations wont have any bandwidth, we want to check for that
@@ -208,6 +244,21 @@ def _save_laser_artifacts(data, axes, output_dir):
 
 def _save_xarray_panel(data_array, output_path):
     data_array.plot(col="time", col_wrap=4)
+    plt.savefig(output_path)
+    plt.close()
+
+
+def _save_xarray_line_panel(data_array, output_path):
+    """Save 1D line plots with multiple time steps."""
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8), tight_layout=True)
+    axes = axes.flatten()
+
+    for i, time_idx in enumerate(range(len(data_array.time))):
+        if i >= len(axes):
+            break
+        data_array.isel(time=time_idx).plot(ax=axes[i])
+        axes[i].set_title(f"t = {float(data_array.time[time_idx]):.2f} ps")
+
     plt.savefig(output_path)
     plt.close()
 
@@ -237,32 +288,57 @@ def _save_epw_artifacts(data, axes, output_dir):
     epw_dir = os.path.join(output_dir, "epw")
     os.makedirs(epw_dir, exist_ok=True)
 
-    phi = np.array([data["divE_save"][i] for i in range(len(data["divE_save"]))])
-    phi_da = xr.DataArray(
-        phi,
-        dims=("time", "x", "y"),
-        coords={
-            "x": ("x", axes["x"], {"units": "um"}),
-            "y": ("y", axes["y"], {"units": "um"}),
-            "time": ("time", axes["time"], {"units": "ps"}),
-        },
-        name="phi",
-    )
-    _save_xarray_panel(np.abs(phi_da[axes["tslice"]].T), os.path.join(epw_dir, "phi.png"))
-    phi_da.to_netcdf(os.path.join(epw_dir, "epw_fields.nc"))
+    phi = np.array(data["divE_save"])[:, 0]
 
-    phi_k_da = _build_phi_fourier(phi, axes)
-    phi_k_da[axes["tslice"]].T.plot(col="time", col_wrap=4)
-    plt.savefig(os.path.join(epw_dir, "phi_kx_ky.png"))
-    
-    plt.clf()
-    np.log10(np.abs(phi_k_da[axes["tslice"]])).T.plot(col="time", col_wrap=4)
-    plt.savefig(os.path.join(epw_dir, "phi_kx_ky_log10.png"))
+    if axes["is_1d"]:
+        # 1D case: phi has shape (time, x)
+        phi_da = xr.DataArray(
+            phi,
+            dims=("time", "x"),
+            coords={
+                "x": ("x", axes["x"], {"units": "um"}),
+                "time": ("time", axes["time"], {"units": "ps"}),
+            },
+            name="phi",
+        )
+        _save_xarray_line_panel(np.abs(phi_da[axes["tslice"]]), os.path.join(epw_dir, "phi.png"))
+        phi_da.to_netcdf(os.path.join(epw_dir, "epw_fields.nc"))
+
+        # 1D Fourier transform
+        phi_k_da = _build_phi_fourier_1d(phi, axes)
+        _save_xarray_line_panel(phi_k_da[axes["tslice"]], os.path.join(epw_dir, "phi_kx.png"))
+
+        plt.clf()
+        _save_xarray_line_panel(np.log10(np.abs(phi_k_da[axes["tslice"]])), os.path.join(epw_dir, "phi_kx_log10.png"))
+    else:
+        # 2D case: phi has shape (time, x, y)
+        phi_da = xr.DataArray(
+            phi,
+            dims=("time", "x", "y"),
+            coords={
+                "x": ("x", axes["x"], {"units": "um"}),
+                "y": ("y", axes["y"], {"units": "um"}),
+                "time": ("time", axes["time"], {"units": "ps"}),
+            },
+            name="phi",
+        )
+        _save_xarray_panel(np.abs(phi_da[axes["tslice"]].T), os.path.join(epw_dir, "phi.png"))
+        phi_da.to_netcdf(os.path.join(epw_dir, "epw_fields.nc"))
+
+        # 2D Fourier transform
+        phi_k_da = _build_phi_fourier(phi, axes)
+        phi_k_da[axes["tslice"]].T.plot(col="time", col_wrap=4)
+        plt.savefig(os.path.join(epw_dir, "phi_kx_ky.png"))
+
+        plt.clf()
+        np.log10(np.abs(phi_k_da[axes["tslice"]])).T.plot(col="time", col_wrap=4)
+        plt.savefig(os.path.join(epw_dir, "phi_kx_ky_log10.png"))
 
     plt.close()
 
 
 def _build_phi_fourier(phi, axes):
+    """Build 2D Fourier transform of phi."""
     c = 299.792458
     w0 = 5366.52868179
     kx = np.fft.fftshift(np.fft.fftfreq(phi.shape[1], d=(axes["x"][1] - axes["x"][0]) / (2 * np.pi))) * c / w0
@@ -281,39 +357,86 @@ def _build_phi_fourier(phi, axes):
     )
 
 
+def _build_phi_fourier_1d(phi, axes):
+    """Build 1D Fourier transform of phi."""
+    c = 299.792458
+    w0 = 5366.52868179
+    kx = np.fft.fftshift(np.fft.fftfreq(phi.shape[1], d=(axes["x"][1] - axes["x"][0]) / (2 * np.pi))) * c / w0
+    phi_k = np.fft.fftshift(np.fft.fft(phi, axis=1), axes=1)
+
+    return xr.DataArray(
+        np.abs(phi_k),
+        dims=("time", "kx"),
+        coords={
+            "kx": ("kx", kx, {"units": "c/$\\omega_0$"}),
+            "time": ("time", axes["time"], {"units": "ps"}),
+        },
+        name="phi_k",
+    )
+
+
 def _save_density_artifacts(data, axes, output_dir):
     density_dir = os.path.join(output_dir, "density")
     nelf_dir = os.path.join(output_dir, "nelf")
     os.makedirs(density_dir, exist_ok=True)
     os.makedirs(nelf_dir, exist_ok=True)
 
-    background_density_da = xr.DataArray(
-        data["backgroundDensity"],
-        dims=("x", "y"),
-        coords={
-            "x": ("x", axes["x"], {"units": "um"}),
-            "y": ("y", axes["y"], {"units": "um"}),
-        },
-        name="background_density",
-    )
-    background_density_da.T.plot()
-    plt.savefig(os.path.join(density_dir, "background_density.png"))
-    plt.close()
-    background_density_da.to_netcdf(os.path.join(density_dir, "background_density.nc"))
+    if axes["is_1d"]:
+        # 1D case: data has shape (x,)
+        background_density_da = xr.DataArray(
+            np.squeeze(data["backgroundDensity"]),
+            dims=("x",),
+            coords={
+                "x": ("x", axes["x"], {"units": "um"}),
+            },
+            name="background_density",
+        )
+        background_density_da.plot()
+        plt.savefig(os.path.join(density_dir, "background_density.png"))
+        plt.close()
+        background_density_da.to_netcdf(os.path.join(density_dir, "background_density.nc"))
 
-    nelf_da = xr.DataArray(
-        data["Nelf"],
-        dims=("x", "y"),
-        coords={
-            "x": ("x", axes["x"], {"units": "um"}),
-            "y": ("y", axes["y"], {"units": "um"}),
-        },
-        name="nelf",
-    )
-    nelf_da.T.plot()
-    plt.savefig(os.path.join(nelf_dir, "nelf.png"))
-    plt.close()
-    nelf_da.to_netcdf(os.path.join(nelf_dir, "nelf.nc"))
+        nelf_da = xr.DataArray(
+            np.squeeze(data["Nelf"]),
+            dims=("x",),
+            coords={
+                "x": ("x", axes["x"], {"units": "um"}),
+            },
+            name="nelf",
+        )
+        nelf_da.plot()
+        plt.savefig(os.path.join(nelf_dir, "nelf.png"))
+        plt.close()
+        nelf_da.to_netcdf(os.path.join(nelf_dir, "nelf.nc"))
+    else:
+        # 2D case: data has shape (x, y)
+        background_density_da = xr.DataArray(
+            data["backgroundDensity"],
+            dims=("x", "y"),
+            coords={
+                "x": ("x", axes["x"], {"units": "um"}),
+                "y": ("y", axes["y"], {"units": "um"}),
+            },
+            name="background_density",
+        )
+        background_density_da.T.plot()
+        plt.savefig(os.path.join(density_dir, "background_density.png"))
+        plt.close()
+        background_density_da.to_netcdf(os.path.join(density_dir, "background_density.nc"))
+
+        nelf_da = xr.DataArray(
+            data["Nelf"],
+            dims=("x", "y"),
+            coords={
+                "x": ("x", axes["x"], {"units": "um"}),
+                "y": ("y", axes["y"], {"units": "um"}),
+            },
+            name="nelf",
+        )
+        nelf_da.T.plot()
+        plt.savefig(os.path.join(nelf_dir, "nelf.png"))
+        plt.close()
+        nelf_da.to_netcdf(os.path.join(nelf_dir, "nelf.nc"))
 
 
 def _save_fig(fig, output_path):

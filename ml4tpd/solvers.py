@@ -141,7 +141,11 @@ class TPDModule(BaseLPSE2D):
             metrics["loss"] = float(val)
 
         # calculate l2 norm of gradients and log them as metrics
-        if "grad" in run_output and "laser" in run_output["grad"]:
+        if (
+            "grad" in run_output
+            and "laser" in run_output["grad"]
+            and "arbitrary" in self.cfg["drivers"]["E0"]["shape"].casefold()
+        ):
             grad = run_output["grad"]["laser"]
             keyed_leaves, _ = jax.tree.flatten_with_path(grad)
             for key_path, value in keyed_leaves:

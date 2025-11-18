@@ -23,15 +23,15 @@ else:
 
 
 def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", num_nodes=4, amp_init="uniform", bandwidth_run_id=None):
-    temperatures = np.round(np.linspace(2000, 4000, 3), 0)
-    gradient_scale_lengths = np.round(np.linspace(200, 600, 5), 0)
+    temperatures = np.round(np.linspace(2000, 4000, 3), 0)[-1:]
+    gradient_scale_lengths = np.round(np.linspace(200, 600, 5), 0)[-1:]
 
     # intensities = np.round(np.linspace(1.0e14, 1.0e15, 16), 3)
     # intensities = np.array([4.0e14, 6.0e14, 8.0e14])
     # intensity_factors = np.linspace(0.5, 1.5, 11)
     # intensity_factors = np.linspace(0.2, 0.6, 2)[::-1]
     # intensity_factors = np.linspace(1.0, 1.6, 7)
-    intensity_factors = np.linspace(2.0, 3.0, 6)
+    intensity_factors = np.linspace(0.5, 2.5, 3)
     
 
     all_hps = list(product(temperatures, gradient_scale_lengths, intensity_factors))
@@ -46,15 +46,15 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
     parsl_run_opt = python_app(run_opt_with_retry)
     # parsl_run_matlab = python_app(run_matlab)
 
-    orig_cfg["mlflow"]["experiment"] = "tpd-100ps-matlab-baseline" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
-    # orig_cfg["mlflow"]["experiment"] = "tpd-100ps-adept-validation" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
+    orig_cfg["mlflow"]["experiment"] = "srs-25ps-matlab-baseline" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
+    # orig_cfg["mlflow"]["experiment"] = "srs-25ps-adept" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
 
     opt = orig_cfg["opt"]["method"]
     # if "arbitrary" in shape:
     #     orig_cfg["mlflow"]["experiment"] = f"{solver}-{shape}-tpd-100ps-{opt}"
 
     # delete failed and running runs
-    # all_hps, all_runs = get_remaining_runs(orig_cfg, all_hps)
+    all_hps, all_runs = get_remaining_runs(orig_cfg, all_hps)
 
     with parsl.load(parsl_config):
         with tempfile.TemporaryDirectory(dir=BASE_TEMPDIR) as _td:
@@ -76,7 +76,7 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
                         2,
                     )
 
-                    run_name = f"temperature={tt:.1f}-gsl={gsl:.1f}-intensity={intensity:.2e}-{shape}"
+                    run_name = f"temperature={tt:.1f}-gsl={gsl:.1f}-intensity={intensity:.2e}-{shape}-dumps"
                     # run_name = f"temperature={tt:.1f}-gsl={gsl:.1f}-intensity={intensity:.2e}-shape-{shape}-noe0yfilter"
                     orig_cfg["mlflow"]["run"] = run_name  # + f"-bounded"
                     # check if run name exists by first searching all runs and then checking if the run name exists
@@ -160,14 +160,20 @@ def get_remaining_runs(orig_cfg, all_hps):
         for run_name in all_runs["tags.mlflow.runName"].values:
             if run_name.startswith("temperature="):
                 completed_runs.add(run_name)
-    all_hps = [
-        hp
-        for hp in all_hps
-        if f"temperature={hp[0]:.1f}-gsl={hp[1]:.1f}-intensity={round(hp[2] * calc_tpd_broadband_threshold_intensity(hp[0] / 1000, hp[1], 0.351, orig_cfg['drivers']['E0']['delta_omega_max'] * 2) * 1e14, 2):.2e}"
-        # if f"temperature={hp[0]:.1f}-gsl={hp[1]:.1f}-intensity={hp[2]:.2e}" not in completed_runs
-    ]
-    print(f"Found {len(completed_runs)} completed runs, {len(all_hps)} remaining.")
-    return all_hps, all_runs
+
+    remaining_runs = []
+    for hp in all_hps:
+        run_name = f"temperature={hp[0]:.1f}-gsl={hp[1]:.1f}-intensity={round(hp[2] * calc_tpd_broadband_threshold_intensity(hp[0] / 1000, hp[1], 0.351, orig_cfg['drivers']['E0']['delta_omega_max'] * 2) * 1e14, 2):.2e}-{shape}-dumps"
+        if run_name not in completed_runs:
+            remaining_runs.append(hp)
+    # all_hps = [
+    #     hp
+    #     for hp in all_hps
+    #     if f"temperature={hp[0]:.1f}-gsl={hp[1]:.1f}-intensity={round(hp[2] * calc_tpd_broadband_threshold_intensity(hp[0] / 1000, hp[1], 0.351, orig_cfg['drivers']['E0']['delta_omega_max'] * 2) * 1e14, 2):.2e}-opt"
+    #     # if f"temperature={hp[0]:.1f}-gsl={hp[1]:.1f}-intensity={hp[2]:.2e}" not in completed_runs
+    # ]
+    print(f"Found {len(completed_runs)} completed runs, {len(remaining_runs)} remaining.")
+    return remaining_runs, all_runs
 
 
 def retrieve_latest_child_run(mlflow, orig_cfg, run_name):

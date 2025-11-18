@@ -27,19 +27,19 @@ drivers:
       amplitudes: 
         init: uniform # uniform, random
         learned: true
-        activation: linear
+        activation: log
         bounded: false
       phases:
         init: random # random, seed-###
         learned: true
-        seed: 24
+        seed: 42
 
 grid:
   boundary_abs_coeff: 1
   boundary_width: 3.0um
   dt: 0.007ps
   dx: 40nm
-  low_pass_filter: 0.5
+  low_pass_filter: 0.65
   tmax: 100ps
   tmin: 0.0ns
   ymax: 6um
@@ -56,7 +56,7 @@ parsl:
 
 mlflow:
   experiment: learn-tpd-100ps
-  run: Te-avg-Ln200-arb-lr01
+  run: Te-avg-Ln200-arb-lr01-threshold
 
 save:
   fields:

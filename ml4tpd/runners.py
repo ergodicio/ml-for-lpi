@@ -34,7 +34,7 @@ def clear_xla_cache():
 def _execute_adept_forward(cfg, parent_run_id):
     import jax
     # jax.config.update("jax_enable_x64", True)
-    
+
     from adept import ergoExo
     from ml4tpd import TPDModule
 
@@ -60,10 +60,9 @@ def run_adept_fwd(_cfg_path, parent_run_id=None, seed=None, run_name=None):
     Returns:
         The loss value from the forward evaluation.
     """
-    
+
     import yaml, mlflow
     from adept import utils as adept_utils
-
 
     with open(_cfg_path, "r") as fi:
         cfg = yaml.safe_load(fi)
@@ -88,7 +87,7 @@ def run_adept_fwd(_cfg_path, parent_run_id=None, seed=None, run_name=None):
 
 
 def run_adept_fwd_ensemble(_cfg_path, num_seeds=8):
-    import yaml, mlflow
+    import yaml, mlflow, os
 
     from adept import utils as adept_utils
     import numpy as np
@@ -105,13 +104,17 @@ def run_adept_fwd_ensemble(_cfg_path, num_seeds=8):
             run_name = f"seed-{i}"
             val = run_adept_fwd(_cfg_path=_cfg_path, parent_run_id=parent_run.info.run_id, seed=seed, run_name=run_name)
             vals.append(val)
+            if "file" in cfg["drivers"]["E0"]:
+                weights_path = cfg["drivers"]["E0"]["file"]
+                if os.path.exists(weights_path):
+                    mlflow.log_artifact(weights_path, run_id=parent_run.info.run_id)
         mean_val = float(np.mean(vals))
         mlflow.log_metric("loss", mean_val)
     return mean_val
 
 
 def run_one_val_and_grad(parent_run_id, _run_cfg_path, export=False):
-    import os, yaml
+    import os, yaml, mlflow
     from equinox import partition
 
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -130,6 +133,9 @@ def run_one_val_and_grad(parent_run_id, _run_cfg_path, export=False):
     diff_modules, static_modules = {}, {}
     diff_modules["laser"], static_modules["laser"] = partition(modules["laser"], modules["laser"].get_partition_spec())
     val, grad, (sol, ppo, _) = exo.val_and_grad(diff_modules, args={"static_modules": static_modules}, export=export)
+    weights_path = _run_cfg["drivers"]["E0"]["file"]
+    if os.path.exists(weights_path):
+        mlflow.log_artifact(weights_path, run_id=exo.mlflow_run_id)
 
     return val, grad
 
