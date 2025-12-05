@@ -8,14 +8,23 @@ def setup_parsl(parsl_provider="local", num_gpus=4, nodes=1, walltime="00:30:00"
 
     if parsl_provider == "local":
         if nodes == 1:
-            this_provider = LocalProvider
-            provider_args = get_singlenode_local_provider_args()
-            htex = HighThroughputExecutor(
-                available_accelerators=num_gpus,
-                label=label,
-                provider=this_provider(**provider_args),
-                cpu_affinity="block",
-            )
+            if num_gpus > 0:
+                this_provider = LocalProvider
+                provider_args = get_singlenode_local_provider_args()
+                htex = HighThroughputExecutor(
+                    available_accelerators=num_gpus,
+                    label=label,
+                    provider=this_provider(**provider_args),
+                    cpu_affinity="block",
+                )
+            else:
+                this_provider = LocalProvider
+                provider_args = get_singlenode_local_provider_args()
+                htex = HighThroughputExecutor(
+                    label=label,
+                    provider=this_provider(**provider_args),
+                    cpu_affinity="block", cores_per_worker=64,
+                )
 
         else:
             if num_gpus > 0:

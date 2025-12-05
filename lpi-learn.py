@@ -598,12 +598,8 @@ class TrainingLoop:
         return filtered
 
     def _build_validation_factors(self, hp_key) -> List[float]:
-        """Return validation intensity factors from the per-HP dynamic range."""
-        hp_range = self.hp_factor_ranges.get(hp_key)
-        if hp_range is None:
-            # Fallback to initial values if HP not found
-            hp_range = {"min": self.factor_min_initial, "max": self.factor_max_initial}
-        factors = np.linspace(hp_range["min"], hp_range["max"], self.validation_intensity_default_samples)
+        """Return static validation intensity factors."""
+        factors = np.linspace(1.1, 2.5, 8)
         return [float(f) for f in factors]
 
     def _write_validation_config(

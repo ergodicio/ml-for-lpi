@@ -580,9 +580,12 @@ class GenerativeDriver(ArbitraryDriver):
                     replace=(True, True),
                 )
 
+        # if self.model_cfg["amplitudes"]["learned"] or self.model_cfg["phases"]["learned"]:
         filter_spec = tree_at(lambda tree: tree.model, filter_spec, replace=model_filter_spec)
-        filter_spec = tree_at(lambda tree: tree.model.amp_decoder, filter_spec, replace=amp_model_filter_spec)
-        filter_spec = tree_at(lambda tree: tree.model.phase_decoder, filter_spec, replace=phase_model_filter_spec)
+        if self.model_cfg["amplitudes"]["learned"]:
+            filter_spec = tree_at(lambda tree: tree.model.amp_decoder, filter_spec, replace=amp_model_filter_spec)
+        if self.model_cfg["phases"]["learned"]:
+            filter_spec = tree_at(lambda tree: tree.model.phase_decoder, filter_spec, replace=phase_model_filter_spec)
 
         return filter_spec
 

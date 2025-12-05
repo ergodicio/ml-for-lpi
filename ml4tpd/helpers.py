@@ -64,7 +64,7 @@ def plot_coherence(lpse_module, used_driver, td, density):
     tau, gtau = calc_coherence(lpse_module, used_driver, density)
     tau_0 = 2 * np.pi / (lpse_module.diffeqsolve_quants["terms"].vector_field.light.w0)
 
-    metrics = {"tau_cf": np.trapz(np.abs(gtau) ** 2.0, tau)}
+    metrics = {"tau_cf": np.trapezoid(np.abs(gtau) ** 2.0, x=tau)}
 
     integrand = np.abs(gtau) ** 2.0
     half_integrand = integrand[len(integrand) // 2 :]
@@ -72,8 +72,8 @@ def plot_coherence(lpse_module, used_driver, td, density):
 
     for i in range(1, 4):
         slc = slice(len(integrand) // 2 - decreasing_order_args[-i], len(integrand) // 2 + decreasing_order_args[-i])
-        _tau, int = tau[slc], integrand[slc]
-        metrics[f"tau_c{str(i)}"] = np.trapz(int, _tau)
+        _tau, _int = tau[slc], integrand[slc]
+        metrics[f"tau_c{str(i)}"] = np.trapezoid(_int, _tau)
         metrics[f"bound_{str(i)}"] = _tau[-1]
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 5), tight_layout=True)
@@ -81,7 +81,7 @@ def plot_coherence(lpse_module, used_driver, td, density):
     ax.set_xlabel(r"Time delay (in units of $\tau_0$)")
     ax.set_ylabel("Coherence")
     ax.grid()
-    ax.set_title(rf"$\tau_c = {round(metrics['tau_cf'] * 1000, 2)}$ fs")
+    ax.set_title(rf"$\tau_c = {np.round(metrics['tau_cf'] * 1000, 2)}$ fs")
     fig.savefig(os.path.join(td, "driver", "coherence.png"), bbox_inches="tight")
 
     plt.close()

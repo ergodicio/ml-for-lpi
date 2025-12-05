@@ -23,15 +23,15 @@ else:
 
 
 def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", num_nodes=4, amp_init="uniform", bandwidth_run_id=None):
-    temperatures = np.round(np.linspace(2000, 4000, 3), 0)[:1]
-    gradient_scale_lengths = np.round(np.linspace(200, 600, 5), 0)[:1]
+    temperatures = np.round(np.linspace(2000, 4000, 3), 0)[-1:]
+    gradient_scale_lengths = np.round(np.linspace(200, 600, 5), 0)[-1:]
 
     # intensities = np.round(np.linspace(1.0e14, 1.0e15, 16), 3)
     # intensities = np.array([4.0e14, 6.0e14, 8.0e14])
     # intensity_factors = np.linspace(0.5, 1.5, 11)
     # intensity_factors = np.linspace(0.2, 0.6, 2)[::-1]
-    # intensity_factors = np.linspace(1.0, 1.6, 7)
-    intensity_factors = np.linspace(0.5, 1.5, 4)
+    # intensity_factors = np.linspace(0.7, 2.0, 14)
+    intensity_factors = np.linspace(0.7, 1.3, 4)
     
 
     all_hps = list(product(temperatures, gradient_scale_lengths, intensity_factors))
@@ -44,15 +44,16 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
     parsl_run_adept_fwd = python_app(run_adept_fwd_ensemble)
     # parsl_run_adept_fwd = run_adept_fwd_ensemble
     parsl_run_opt = python_app(run_opt_with_retry)
-    # parsl_run_matlab = python_app(run_matlab)
+    parsl_run_matlab = python_app(run_matlab)
 
-    orig_cfg["mlflow"]["experiment"] = "Default"
+    # orig_cfg["mlflow"]["experiment"] = "Default"
     # orig_cfg["mlflow"]["experiment"] = "srs-25ps-matlab-baseline" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
-    # orig_cfg["mlflow"]["experiment"] = "srs-25ps-adept" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
+    orig_cfg["mlflow"]["experiment"] = "tpd-25ps-adept" #f"{solver}-{shape}-tpd-100ps-smalldxdt"
 
     opt = orig_cfg["opt"]["method"]
     # if "arbitrary" in shape:
     #     orig_cfg["mlflow"]["experiment"] = f"{solver}-{shape}-tpd-100ps-{opt}"
+    
 
     # delete failed and running runs
     # all_hps, all_runs = get_remaining_runs(orig_cfg, all_hps)
@@ -99,10 +100,16 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
                         # )
                     elif shape == "opt":
                         orig_cfg["drivers"]["E0"]["num_colors"] = 32
-                        orig_cfg["drivers"]["E0"]["shape"] = "smooth_arbitrary"
-                        orig_cfg["drivers"]["E0"]["file"] = (
+                        # orig_cfg["drivers"]["E0"]["shape"] = "smooth_arbitrary"
+                        
+                        # orig_cfg["drivers"]["E0"]["file"] = (
                             # f"s3://public-ergodic-continuum/188533/{bandwidth_run_id}/artifacts/driver/used_driver.pkl"
-                            "s3://public-ergodic-continuum/188533/4d2fb0035ca44b5892bd7e9b0015e20f/artifacts/weights-e37-b00.eqx"
+                            # "s3://public-ergodic-continuum/188533/4d2fb0035ca44b5892bd7e9b0015e20f/artifacts/weights-e37-b00.eqx"
+                        # )
+
+                        orig_cfg["drivers"]["E0"]["shape"] = "generative"
+                        orig_cfg["drivers"]["E0"]["file"] = (
+                            "s3://public-ergodic-continuum/188566/094473fc22be4190ad3448e1055fbb22/artifacts/weights-e144-b00.eqx"
                         )
                         
                     orig_cfg["units"]["reference electron temperature"] = f"{tt} eV"
@@ -128,7 +135,7 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
 
                     elif solver == "matlab":
                         try:
-                            vals[tt, gsl, intensity] = run_matlab(new_cfg_path, shape=shape, bandwidth_run_id=bandwidth_run_id)
+                            vals[tt, gsl, intensity] = parsl_run_matlab(new_cfg_path, shape=shape, bandwidth_run_id=bandwidth_run_id)
                         except Exception as exc:
                             logger.exception(
                                 "MATLAB run failed for %s (T=%s, GSL=%s, I=%s): %s",
@@ -145,9 +152,9 @@ def scan_loop(_cfg_path, shape="uniform", solver="adept", parsl_provider="gpu", 
                     # else:
                     #     print(f"Run {run_name} already exists.")
 
-                if solver == "adept":
-                    for (tt, gsl, intensity), v in vals.items():
-                        val = v.result()
+                # if solver == "adept":
+                for (tt, gsl, intensity), v in vals.items():
+                    val = v.result()
 
 
 def get_remaining_runs(orig_cfg, all_hps):

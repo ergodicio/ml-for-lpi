@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -88,7 +89,7 @@ def _execute_seed_run(seed_params, shape, base_tempdir):
 
         mlflow.log_artifacts(td)
 
-    return {}
+    return metrics
 
 
 def _run_matlab_simulation(seed_params, shape, output_dir):
@@ -97,16 +98,17 @@ def _run_matlab_simulation(seed_params, shape, output_dir):
         bandwidth_file = os.path.join(
             os.path.abspath("/global/homes/a/archis/lpse-matlab/"), f"{seed_params['bandwidth_run_id']}.csv"
         )
-        mlflow.artifacts.download_artifacts(
-            run_id=seed_params["bandwidth_run_id"],
-            artifact_path="driver/used_driver.csv",
-            dst_path=os.path.abspath("/global/homes/a/archis/lpse-matlab/"),
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = mlflow.artifacts.download_artifacts(
+                run_id=seed_params["bandwidth_run_id"],
+                artifact_path="driver/used_driver.csv",
+                dst_path=tmpdir,
+            )
         # move file from "/global/homes/a/archis/lpse-matlab/used_driver.csv") to run_id.csv
-        os.rename(
-            os.path.join(os.path.abspath("/global/homes/a/archis/lpse-matlab/"), "used_driver.csv"),
-            bandwidth_file,
-        )
+            shutil.move(
+                os.path.join(tmpdir, "used_driver.csv"),
+                bandwidth_file
+            )
 
     matlab_cmd = [
         "matlab",
@@ -213,8 +215,8 @@ def _save_laser_artifacts(data, axes, output_dir):
         _save_xarray_line_panel(np.abs(laser_ds["E0y"][axes["tslice"]]), os.path.join(laser_dir, "E0y.png"))
     else:
         # 2D case: data has shape (time, x, y)
-        E0x = np.array([_arr[0]["x"][:, 0] for _arr in data["E0_save"]])
-        E0y = np.array([_arr[0]["y"][:, 0] for _arr in data["E0_save"]])
+        E0x = np.array([_arr[0]["x"] for _arr in data["E0_save"]])
+        E0y = np.array([_arr[0]["y"] for _arr in data["E0_save"]])
 
         laser_ds = xr.Dataset(
             {
